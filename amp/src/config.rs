@@ -203,7 +203,7 @@ pub struct UiState {
     pub pl_h: i32,
     pub pl_open: bool,
     pub docked: bool,
-    pub scale: i32, // 0: pick from the screen's DPI
+    pub scale: i32, // zoom in percent; 0: follow the screen's DPI
     pub on_top: bool,
     pub scroll: bool,
     pub remaining: bool,
@@ -237,7 +237,13 @@ pub fn load_state() -> UiState {
             "pl_h" => s.pl_h = n.unwrap_or(s.pl_h).clamp(116, 4000),
             "pl_open" => s.pl_open = b.unwrap_or(s.pl_open),
             "docked" => s.docked = b.unwrap_or(s.docked),
-            "scale" => s.scale = n.unwrap_or(0).clamp(0, 3),
+            // Percent, or 0 to follow the screen. Older builds saved 1 or 2 (1x / 2x), and
+            // always wrote 1 even when it was only the default.
+            "scale" => s.scale = match n.unwrap_or(0) {
+                2..=4 => n.unwrap_or(0) * 100,
+                p @ 100..=300 => p,
+                _ => 0,
+            }.min(300),
             "on_top" => s.on_top = b.unwrap_or(s.on_top),
             "scroll" => s.scroll = b.unwrap_or(s.scroll),
             "remaining" => s.remaining = b.unwrap_or(s.remaining),

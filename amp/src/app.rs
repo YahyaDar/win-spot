@@ -17,12 +17,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 use windows_sys::Win32::Foundation::{HWND, RECT};
-use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, HFONT};
+use windows_sys::Win32::Graphics::Gdi::{DeleteObject, InvalidateRect, HFONT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, KillTimer, SetTimer};
 
 use crate::config::{self, Settings, UiState};
 use crate::engine::Engine;
-use crate::gfx::Surface;
+use crate::gfx::{self, Surface};
 use crate::skin::Skin;
 use crate::spotify::{self as sp, ApiError, Playback, Playlist, Repeat, Track};
 
@@ -133,6 +133,70 @@ enum Then {
     Transfer,
 }
 
+/// Changes made on another device, shown until Spotify reports them: Spotify applies
+/// commands with a lag, and a poll in between would otherwise snap the display back.
+/// Each is (value, until when).
+#[derive(Default)]
+struct Holds {
+    volume: Option<(u8, Instant)>,
+    shuffle: Option<(bool, Instant)>,
+    repeat: Option<(Repeat, Instant)>,
+    playing: Option<(bool, Instant)>,
+    /// (position, when it was set, until when)
+    progress: Option<(u32, Instant, Instant)>,
+}
+
+const HOLD: Duration = Duration::from_secs(4);
+
+impl Holds {
+    fn clear(&mut self) {
+        *self = Holds::default();
+    }
+
+    /// Spotify has applied the commands by now: keep each held a little longer from here.
+    fn extend(&mut self, now: Instant) {
+        let later = |d: &mut Instant| *d = (*d).max(now + Duration::from_millis(2500));
+        if let Some((_, d)) = &mut self.volume { later(d); }
+        if let Some((_, d)) = &mut self.shuffle { later(d); }
+        if let Some((_, d)) = &mut self.repeat { later(d); }
+        if let Some((_, d)) = &mut self.playing { later(d); }
+    }
+
+    /// Lay what's held over a poll result; true if anything is still unconfirmed.
+    fn apply(&mut self, pb: &mut Playback, now: Instant) -> bool {
+        fn one<T: PartialEq + Copy>(slot: &mut Option<(T, Instant)>, got: &mut T, now: Instant) -> bool {
+            match *slot {
+                Some((v, d)) if *got != v && now < d => {
+                    *got = v;
+                    true
+                }
+                _ => {
+                    *slot = None;
+                    false
+                }
+            }
+        }
+        let mut pending = false;
+        if let Some(vol) = pb.volume.as_mut() {
+            pending |= one(&mut self.volume, vol, now);
+        }
+        pending |= one(&mut self.shuffle, &mut pb.shuffle, now);
+        pending |= one(&mut self.repeat, &mut pb.repeat, now);
+        pending |= one(&mut self.playing, &mut pb.playing, now);
+        if let Some((pos, set, until)) = self.progress {
+            let want = pos + if pb.playing { now.saturating_duration_since(set).as_millis() as u32 } else { 0 };
+            if now >= until || pb.progress(now).abs_diff(want) < 3000 {
+                self.progress = None;
+            } else {
+                pb.progress_ms = want;
+                pb.at = now;
+                pending = true;
+            }
+        }
+        pending
+    }
+}
+
 /// What a press of play/enter asked for while the player was still starting.
 #[derive(Clone)]
 struct PlayReq {
@@ -179,11 +243,20 @@ pub struct App {
     pub pl_sf: Surface,
     pub pl_font: HFONT,
     pub small_font: HFONT,
-    pub scale: i32,
+    /// Zoom in percent (100 = the skin's own size), and what the screen's DPI suggests.
+    pub pct: i32,
+    pub auto_pct: i32,
     pub main_active: bool,
     pub pl_active: bool,
     pub phase: Phase,
     pub hold: Hold,
+    /// The pointer is still over the button being held (it's drawn pressed only then).
+    pub hold_inside: bool,
+    /// Where in a slider's thumb it was grabbed, so grabbing it doesn't make it jump.
+    pub grab: i32,
+    /// Shuffle and repeat chosen before anything plays: used by the first play.
+    pub pref_shuffle: bool,
+    pub pref_repeat: Repeat,
 
     // playback
     pub pb: Option<Playback>,
@@ -212,7 +285,7 @@ pub struct App {
     cmd_seq: u32,
     burst: u32,
     remote_expect: Option<RemoteExpect>,
-    cmd_gen: HashMap<&'static str, u32>,
+    holds: Holds,
     vol_target: Option<u8>,
     vol_deadline: Option<Instant>,
     seek_target: Option<u32>,
@@ -255,15 +328,17 @@ pub fn invalidate(h: HWND) {
 
 impl App {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(s: Settings, ui: UiState, skin: Skin, engine: Engine, pl_font: HFONT, small_font: HFONT, scale: i32) -> App {
+    pub fn new(s: Settings, ui: UiState, skin: Skin, engine: Engine, pct: i32, auto_pct: i32) -> App {
         let mut lists = HashMap::new();
         lists.insert("liked".to_string(), TrackList::new("liked", Kind::Liked, "Liked Songs"));
         lists.insert("search".to_string(), TrackList::new("search", Kind::Search, "Search"));
         let (pw, ph) = (ui.pl_w, ui.pl_h);
-        App {
+        let mut app = App {
             s, ui, skin, engine, hmain: std::ptr::null_mut(), hpl: std::ptr::null_mut(),
-            main_sf: Surface::new(275, 116), pl_sf: Surface::new(pw, ph), pl_font, small_font, scale,
+            main_sf: Surface::new(275, 116, pct), pl_sf: Surface::new(pw, ph, pct),
+            pl_font: std::ptr::null_mut(), small_font: std::ptr::null_mut(), pct, auto_pct,
             main_active: true, pl_active: false, phase: Phase::Running, hold: Hold::None,
+            hold_inside: false, grab: 0, pref_shuffle: false, pref_repeat: Repeat::Off,
             pb: None, local: false, liked_uri: None, liked: None, engine_volume: None,
             vol_echo: Echo::default(), shuffle_echo: Echo::default(), repeat_echo: Echo::default(),
             play_echo: Echo::default(), seek_echo: Echo::default(),
@@ -271,14 +346,34 @@ impl App {
             held_track: None, held_state: None, local_grace_until: None, pending_play: None,
             last_load: None, reload_needed: false, player_warned: false,
             next_poll: None, poll_inflight: false, cmd_seq: 0, burst: 0, remote_expect: None,
-            cmd_gen: HashMap::new(), vol_target: None, vol_deadline: None, seek_target: None, seek_deadline: None,
+            holds: Holds::default(), vol_target: None, vol_deadline: None, seek_target: None, seek_deadline: None,
             restarts: Vec::new(), restart_at: None, poll_err: String::new(),
             playlists: Vec::new(), playlists_loaded: false, playlists_acc: Vec::new(), user_id: None,
             lists, cur: "liked".into(), typing: false, eat_char: false, query: String::new(), devices: Vec::new(), devices_wanted: false,
             pending: HashMap::new(), status: String::new(), status_until: None,
             marquee_px: 0, marquee_key: String::new(), marquee_next: None, marquee_scrolls: false, timer_at: None,
             pl_full: std::cell::Cell::new(true),
+        };
+        app.set_fonts();
+        app
+    }
+
+    /// The playlist and marquee fonts, at the zoom's real pixel size.
+    pub fn set_fonts(&mut self) {
+        for f in [self.pl_font, self.small_font] {
+            if !f.is_null() {
+                unsafe { DeleteObject(f) };
+            }
         }
+        let size = |h: i32| (h * self.pct + 50) / 100;
+        let smooth = self.pct > 100;
+        self.pl_font = gfx::make_font(&self.skin.pl.font, size(10), smooth);
+        self.small_font = gfx::make_font(&self.skin.pl.font, size(9), smooth);
+    }
+
+    /// Double size: twice what the screen calls normal, or more.
+    pub fn doubled(&self) -> bool {
+        self.pct >= 2 * self.auto_pct
     }
 
     // ── Redraw and the timer ─────────────────────────────────────────────────
@@ -295,7 +390,7 @@ impl App {
     /// Only the playlist's mini clock changed (the once-a-second tick).
     fn inv_pl_clock(&self) {
         if !self.hpl.is_null() && self.ui.pl_open {
-            invalidate_rect(self.hpl, self.ui.pl_w - 150 + 66, self.ui.pl_h - 38 + 23, 25, 6, self.scale);
+            invalidate_rect(self.hpl, self.ui.pl_w - 150 + 66, self.ui.pl_h - 38 + 23, 25, 6, self.pct);
         }
     }
 
@@ -383,12 +478,16 @@ impl App {
         if self.marquee_scrolls && self.ui.scroll && self.marquee_next.is_none_or(|t| now >= t) {
             self.marquee_px += 5;
             self.marquee_next = Some(now + MARQUEE_STEP);
-            invalidate_rect(self.hmain, 111, 22, 154, 16, self.scale);
+            invalidate_rect(self.hmain, 111, 22, 154, 16, self.pct);
         }
         if self.pb.as_ref().is_some_and(|p| p.playing) {
             // The clock, the position bar and the playlist's mini time.
-            invalidate_rect(self.hmain, 36, 26, 63, 13, self.scale);
-            invalidate_rect(self.hmain, 16, 72, 248, 10, self.scale);
+            if self.ui.shade {
+                invalidate_rect(self.hmain, 120, 0, 130, 14, self.pct);
+            } else {
+                invalidate_rect(self.hmain, 36, 26, 63, 13, self.pct);
+                invalidate_rect(self.hmain, 16, 72, 248, 10, self.pct);
+            }
             self.inv_pl_clock();
         }
         self.reschedule();
@@ -545,6 +644,7 @@ impl App {
             Req::Liked { uri } => match res {
                 Ok(v) if self.liked_uri.as_deref() == Some(&uri) => {
                     self.liked = Some(v.as_array().and_then(|a| a.first()).is_some_and(|b| b == true));
+                    self.inv_main(); // the title shows a * for liked songs
                 }
                 Err(_) if self.liked_uri.as_deref() == Some(&uri) => self.liked_uri = None,
                 _ => {}
@@ -552,6 +652,10 @@ impl App {
             Req::SetLiked { track, new } => match res {
                 Ok(_) => {
                     self.flash(if new { "Added to Liked Songs" } else { "Removed from Liked Songs" }, false);
+                    if self.liked_uri.as_deref() == Some(&track.uri) {
+                        self.liked = Some(new);
+                        self.inv_main();
+                    }
                     if let Some(l) = self.lists.get_mut("liked") {
                         if !l.tracks.is_empty() {
                             if new && l.tracks.iter().all(|x| x.uri != track.uri) {
@@ -596,6 +700,7 @@ impl App {
                     if then == Then::Transfer {
                         self.flash("Playback moved", false);
                     }
+                    self.holds.extend(Instant::now());
                     if then == Then::RemotePlay {
                         if let Some(x) = &mut self.remote_expect {
                             x.until = x.until.max(Instant::now() + Duration::from_secs(4));
@@ -623,12 +728,15 @@ impl App {
                     self.flash(self.describe(&e), true);
                     self.poll_soon(1, Duration::from_millis(350));
                 } else if self.vol_target == Some(v) {
+                    // Applied; keep showing it until a poll agrees (Spotify reports late).
                     self.vol_target = None;
+                    if !self.local {
+                        self.holds.volume = Some((v, Instant::now() + HOLD));
+                    }
                 }
             }
             Req::Retry => {}
         }
-        self.inv_all();
     }
 
     fn describe(&self, e: &ApiError) -> String {
@@ -838,13 +946,17 @@ impl App {
                 at: now,
                 device_id: dev,
                 device_name: self.s.device_name.clone(),
-                volume: if same_dev { old.as_ref().and_then(|p| p.volume) } else { self.engine_volume },
-                shuffle: old.as_ref().is_some_and(|p| p.shuffle),
-                repeat: old.as_ref().map_or(Repeat::Off, |p| p.repeat),
+                // Our own player always has a volume, even before it has said which.
+                volume: Some(self.engine_volume.or(if same_dev { old.as_ref().and_then(|p| p.volume) } else { None }).unwrap_or(50)),
+                shuffle: old.as_ref().map_or(self.pref_shuffle, |p| p.shuffle),
+                repeat: old.as_ref().map_or(self.pref_repeat, |p| p.repeat),
                 context_uri: None,
             });
             self.local = true;
             self.remote_expect = None;
+            self.holds.clear();
+            self.vol_target = None;
+            self.vol_deadline = None;
             self.next_poll = None; // events keep us current: stop polling
         }
         self.pb.as_mut().expect("just set")
@@ -967,6 +1079,21 @@ impl App {
         }
         let pb = sp::playback(&v, now);
         let eng = self.engine.device_id.clone();
+        if !self.local && eng.is_some() && self.engine.ready && pb.as_ref().is_some_and(|p| p.device_id == eng) {
+            // Spotify says our own player is the device (e.g. it resumed a session there):
+            // take it over, so commands go down the pipe instead of through the Web API.
+            let p = pb.expect("checked");
+            self.local = true;
+            self.local_grace_until = None;
+            self.pb = Some(Playback { volume: self.engine_volume.or(p.volume), ..p });
+            self.holds.clear();
+            self.remote_expect = None;
+            let t = self.pb.as_ref().and_then(|p| p.track.clone());
+            self.track_changed(t);
+            self.next_poll = None;
+            self.inv_all();
+            return;
+        }
         if self.local {
             if pb.is_none() || (eng.is_some() && pb.as_ref().unwrap().device_id == eng) {
                 // Still ours: the engine's events are fresher, unless it's reconnecting.
@@ -996,6 +1123,7 @@ impl App {
         if let (Some(p), Some(v)) = (pb.as_mut(), self.vol_target) {
             p.volume = Some(v);
         }
+        let pending = pb.as_mut().is_some_and(|p| self.holds.apply(p, now));
         // Same track: keep the same object so nothing is redrawn for nothing.
         if let (Some(p), Some(old)) = (pb.as_mut(), self.pb.as_ref().and_then(|o| o.track.clone())) {
             if p.track.as_ref().is_some_and(|t| t.uri == old.uri && t.duration_ms == old.duration_ms) {
@@ -1004,9 +1132,22 @@ impl App {
         }
         let track = pb.as_ref().and_then(|p| p.track.clone());
         let playing = pb.as_ref().is_some_and(|p| p.playing);
+        let shown = |p: &Option<Playback>| p.as_ref().map(|p| (
+            p.track.as_ref().map(|t| t.uri.clone()), p.playing, p.volume, p.shuffle, p.repeat, p.device_id.clone(),
+            p.progress(now) / 1000, p.track.as_ref().map(|t| t.duration_ms)));
+        let (before, after) = (shown(&self.pb), shown(&pb));
+        let same_track = before.as_ref().map(|b| b.0.clone()) == after.as_ref().map(|a| a.0.clone());
+        if before != after {
+            self.inv_main();
+            if !same_track {
+                self.inv_pl(); // the playing row's highlight moved
+            }
+        }
         self.pb = pb;
         self.track_changed(track.clone());
-        let delay = if self.burst > 0 {
+        let delay = if pending {
+            Duration::from_millis(700) // re-check soon until Spotify catches up
+        } else if self.burst > 0 {
             self.burst -= 1;
             Duration::from_millis(800)
         } else if let (true, Some(t)) = (playing, &track) {
@@ -1018,7 +1159,6 @@ impl App {
             POLL_IDLE
         };
         self.next_poll = Some(now + delay);
-        self.inv_all();
     }
 
     // ── Playback commands ────────────────────────────────────────────────────
@@ -1078,6 +1218,7 @@ impl App {
         if self.send(json!({"cmd": "pause"})) {
             self.play_echo.sent(now, false);
         } else {
+            self.holds.playing = Some((false, now + HOLD));
             self.command("PUT", "pause", Map::new(), None, Then::Nothing);
         }
         self.inv_all();
@@ -1106,6 +1247,7 @@ impl App {
         if self.send(json!({"cmd": "play"})) {
             self.play_echo.sent(now, true);
         } else {
+            self.holds.playing = Some((true, now + HOLD));
             self.command("PUT", "play", Map::new(), None, Then::Nothing);
         }
         self.inv_all();
@@ -1149,6 +1291,7 @@ impl App {
         let now = Instant::now();
         self.seek_target = None;
         self.seek_deadline = None;
+        self.holds.progress = None; // a pending seek belongs to the track being left
         let changes = self.pb.as_ref().is_some_and(|p| p.track.is_some() && (forward || p.progress(now) < 3000));
         let old = self.pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone());
         if let Some(pb) = &mut self.pb {
@@ -1191,6 +1334,7 @@ impl App {
         if self.send(json!({"cmd": "seek", "ms": pos})) {
             self.seek_echo.sent(now, pos);
         } else {
+            self.holds.progress = Some((pos, now, now + HOLD));
             self.seek_target = Some(pos);
             self.seek_deadline = Some(now + Duration::from_millis(300)); // one request per burst
         }
@@ -1224,6 +1368,10 @@ impl App {
             return;
         }
         let now = Instant::now();
+        if self.pb.as_ref().is_some_and(|p| p.volume.is_none()) {
+            self.flash("Volume can't be changed on this device", true);
+            return;
+        }
         self.flash(format!("Volume: {v}%"), false);
         if self.pb.is_none() {
             // Nothing playing yet: set our own player's volume for when it does.
@@ -1234,10 +1382,6 @@ impl App {
             return;
         }
         if let Some(pb) = &mut self.pb {
-            if pb.volume.is_none() {
-                self.flash("Volume can't be changed on this device", true);
-                return;
-            }
             pb.volume = Some(v);
         }
         if self.send(json!({"cmd": "volume", "pct": v})) {
@@ -1245,7 +1389,10 @@ impl App {
             self.engine_volume = Some(v);
         } else {
             self.vol_target = Some(v);
-            self.vol_deadline = Some(now + Duration::from_millis(250));
+            self.holds.volume = None;
+            if self.vol_deadline.is_none() {
+                self.vol_deadline = Some(now + Duration::from_millis(150));
+            }
         }
         self.inv_main();
     }
@@ -1267,16 +1414,18 @@ impl App {
             return;
         }
         let Some(pb) = &mut self.pb else {
-            self.flash("Nothing is playing", false);
+            self.pref_shuffle = !self.pref_shuffle;
+            self.flash(if self.pref_shuffle { "Shuffle: on" } else { "Shuffle: off" }, false);
             return;
         };
         pb.shuffle = !pb.shuffle;
         let on = pb.shuffle;
+        self.pref_shuffle = on;
         self.flash(if on { "Shuffle: on" } else { "Shuffle: off" }, false);
         if self.send(json!({"cmd": "shuffle", "on": on})) {
             self.shuffle_echo.sent(Instant::now(), on);
         } else {
-            self.next_gen("shuffle");
+            self.holds.shuffle = Some((on, Instant::now() + HOLD));
             let mut q = Map::new();
             q.insert("state".into(), json!(if on { "true" } else { "false" }));
             self.command("PUT", "shuffle", q, None, Then::Nothing);
@@ -1285,7 +1434,7 @@ impl App {
     }
 
     pub fn cycle_repeat(&mut self) {
-        let next = self.pb.as_ref().map_or(Repeat::Context, |p| p.repeat.next());
+        let next = self.pb.as_ref().map_or(self.pref_repeat, |p| p.repeat).next();
         self.set_repeat(next);
     }
 
@@ -1293,25 +1442,19 @@ impl App {
         if self.player_offline() {
             return;
         }
-        let Some(pb) = &mut self.pb else {
-            self.flash("Nothing is playing", false);
-            return;
-        };
-        pb.repeat = r;
+        self.pref_repeat = r;
         self.flash(match r { Repeat::Off => "Repeat: off", Repeat::Context => "Repeat: all", Repeat::Track => "Repeat: one" }, false);
+        let Some(pb) = &mut self.pb else { return };
+        pb.repeat = r;
         if self.send(json!({"cmd": "repeat", "mode": r.as_str()})) {
             self.repeat_echo.sent(Instant::now(), r);
         } else {
-            self.next_gen("repeat");
+            self.holds.repeat = Some((r, Instant::now() + HOLD));
             let mut q = Map::new();
             q.insert("state".into(), json!(r.as_str()));
             self.command("PUT", "repeat", q, None, Then::Nothing);
         }
         self.inv_main();
-    }
-
-    fn next_gen(&mut self, key: &'static str) {
-        *self.cmd_gen.entry(key).or_default() += 1;
     }
 
     pub fn toggle_like(&mut self) {
@@ -1395,6 +1538,8 @@ impl App {
         }
         self.seek_target = None;
         self.seek_deadline = None;
+        self.holds.progress = None;
+        self.holds.playing = Some((true, now + HOLD));
         self.command("PUT", "play", Map::new(), Some(body), Then::RemotePlay);
         self.inv_all();
     }
@@ -1410,7 +1555,7 @@ impl App {
         let Some(l) = self.lists.get(&req.key) else { return };
         let t = req.uri.as_ref().and_then(|u| l.tracks.iter().find(|x| &x.uri == u).cloned());
         let now = Instant::now();
-        let (shuffle, repeat) = self.pb.as_ref().map_or((false, Repeat::Off), |p| (p.shuffle, p.repeat));
+        let (shuffle, repeat) = self.pb.as_ref().map_or((self.pref_shuffle, self.pref_repeat), |p| (p.shuffle, p.repeat));
         let load = if l.kind == Kind::Playlist {
             json!({"cmd": "play_context", "uri": l.context_uri, "track_uri": t.as_ref().map(|t| t.uri.clone())})
         } else {
@@ -1628,6 +1773,31 @@ impl App {
         self.flash("Reloading", false);
     }
 
+    /// Select the song that's playing, if it's in the open list.
+    pub fn jump_to_playing(&mut self) {
+        let Some(uri) = self.pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone()) else {
+            self.flash("Nothing is playing", false);
+            return;
+        };
+        let rows = crate::view::pl_rows(self).max(1);
+        let l = self.cur_list_mut();
+        match l.tracks.iter().position(|t| t.uri == uri) {
+            Some(i) => {
+                l.sel = i;
+                l.top = i.saturating_sub(rows / 2).min(l.tracks.len().saturating_sub(rows));
+                self.inv_pl();
+            }
+            None => self.flash("The playing song isn't in this list (or not loaded yet)", false),
+        }
+    }
+
+    /// Remove the selected song from Liked Songs (the playlist's "-" button).
+    pub fn unlike_selected(&mut self) {
+        let Some(t) = self.selected().filter(|t| t.is_track()) else { return };
+        let q = json!({"uris": format!("spotify:track:{}", t.id())});
+        self.request("DELETE", "me/library", q, None, Req::SetLiked { track: t, new: false });
+    }
+
     pub fn start_search(&mut self) {
         self.cur = "search".into();
         self.eat_char = !self.typing;
@@ -1715,7 +1885,10 @@ impl App {
 }
 
 /// Invalidate a logical (1x) rectangle of a window.
-pub fn invalidate_rect(h: HWND, x: i32, y: i32, w: i32, hgt: i32, scale: i32) {
-    let r = RECT { left: x * scale, top: y * scale, right: (x + w) * scale, bottom: (y + hgt) * scale };
+pub fn invalidate_rect(h: HWND, x: i32, y: i32, w: i32, hgt: i32, pct: i32) {
+    if h.is_null() {
+        return;
+    }
+    let r = gfx::phys_rect(&RECT { left: x, top: y, right: x + w, bottom: y + hgt }, pct);
     unsafe { InvalidateRect(h, &r, 0) };
 }

@@ -2,9 +2,9 @@
 //!
 //! The same `spoterm-engine` that the terminal UI drives plays the audio and makes the
 //! Web API calls; this process is only a window. It is plain Win32 and GDI with no UI
-//! framework: two popup windows drawn from the skin's bitmaps into 1x back buffers and
-//! stretched to double size when asked, one timer that is only armed when something is
-//! due, and an engine pipe read by one blocking thread.
+//! framework: two popup windows drawn from the skin's bitmaps at the window's real pixel
+//! size (any zoom, following each monitor's DPI), one timer that is only armed when
+//! something is due, and an engine pipe read by one blocking thread.
 
 #![windows_subsystem = "windows"]
 
@@ -25,14 +25,14 @@ use windows_sys::Win32::System::DataExchange::{CloseClipboard, GetClipboardData,
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows_sys::Win32::System::Threading::CreateMutexW;
-use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use app::{App, Hold, Phase};
 use engine::{Engine, WM_ENGINE, WM_TASK};
-use gfx::{wide_z, Surface};
+use gfx::{logical, phys, wide_z, Surface, MAX_PCT, MIN_PCT};
 use spotify::Repeat;
 use view::*;
 
@@ -67,6 +67,18 @@ const M_PAUSE: usize = 4061;
 const M_STOP: usize = 4062;
 const M_NEXT: usize = 4063;
 const M_PREV: usize = 4064;
+const M_UNLIKE_SEL: usize = 4070;
+const M_JUMP: usize = 4071;
+const M_FIRST: usize = 4072;
+const M_LAST: usize = 4073;
+const M_INFO: usize = 4074;
+const M_ZOOM_AUTO: usize = 4080;
+const M_ZOOM: usize = 4081; // + index into ZOOMS
+const M_ZOOM_IN: usize = 4090;
+const M_ZOOM_OUT: usize = 4091;
+
+/// The sizes offered, in percent of the skin's own.
+const ZOOMS: [i32; 7] = [100, 125, 150, 175, 200, 250, 300];
 
 // The app lives on the UI thread for the whole run; window procedures reach it here.
 static mut APP: *mut App = null_mut();
@@ -127,10 +139,10 @@ fn main() {
     };
 
     let ui = config::load_state();
-    let scale = if ui.scale > 0 { ui.scale } else if unsafe { GetDpiForSystem() } >= 144 { 2 } else { 1 };
-    let pl_font = gfx::make_font(&skin.pl.font, 10, false);
-    let small_font = gfx::make_font(&skin.pl.font, 9, false);
-    let a = Box::new(App::new(s, ui, skin, Engine::new(bin), pl_font, small_font, scale));
+    let at = if ui.x == i32::MIN { POINT { x: 0, y: 0 } } else { POINT { x: ui.x + 10, y: ui.y + 10 } };
+    let auto = auto_pct(monitor_dpi(at));
+    let pct = if ui.scale > 0 { ui.scale } else { auto };
+    let a = Box::new(App::new(s, ui, skin, Engine::new(bin), pct, auto));
     unsafe { APP = Box::into_raw(a) };
 
     if !create_windows() {
@@ -185,25 +197,25 @@ fn create_windows() -> bool {
             };
             RegisterClassExW(&wc);
         }
-        let sc = a.scale;
+        let pct = a.pct;
         let (mut x, mut y) = (a.ui.x, a.ui.y);
         if x == i32::MIN || !on_screen(x, y) {
-            x = (GetSystemMetrics(SM_CXSCREEN) - MAIN_W * sc) / 2;
-            y = (GetSystemMetrics(SM_CYSCREEN) - (main_h(a) + a.ui.pl_h) * sc) / 3;
+            x = (GetSystemMetrics(SM_CXSCREEN) - phys(MAIN_W, pct)) / 2;
+            y = (GetSystemMetrics(SM_CYSCREEN) - phys(main_h(a) + a.ui.pl_h, pct)) / 3;
         }
         let ex = if a.ui.on_top { WS_EX_TOPMOST } else { 0 } | WS_EX_APPWINDOW;
         let hmain = CreateWindowExW(ex, wide_z(MAIN_CLASS).as_ptr(), wide_z("SpoTermAmp").as_ptr(),
-                                    WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX, x, y, MAIN_W * sc, main_h(a) * sc,
+                                    WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX, x, y, phys(MAIN_W, pct), phys(main_h(a), pct),
                                     null_mut(), null_mut(), hinst, null());
         if hmain.is_null() {
             return false;
         }
         a.hmain = hmain;
         apply_region(a);
-        let (px, py) = if a.ui.docked || !on_screen(a.ui.pl_x, a.ui.pl_y) { (x, y + main_h(a) * sc) } else { (a.ui.pl_x, a.ui.pl_y) };
+        let (px, py) = if a.ui.docked || !on_screen(a.ui.pl_x, a.ui.pl_y) { (x, y + phys(main_h(a), pct)) } else { (a.ui.pl_x, a.ui.pl_y) };
         // Owned by the main window: no taskbar button of its own, minimised with it.
         let hpl = CreateWindowExW(if a.ui.on_top { WS_EX_TOPMOST } else { 0 }, wide_z(PL_CLASS).as_ptr(), wide_z("SpoTermAmp Playlist").as_ptr(),
-                                  WS_POPUP, px, py, a.ui.pl_w * sc, a.ui.pl_h * sc, hmain, null_mut(), hinst, null());
+                                  WS_POPUP, px, py, phys(a.ui.pl_w, pct), phys(a.ui.pl_h, pct), hmain, null_mut(), hinst, null());
         a.hpl = hpl;
         ShowWindow(hmain, SW_SHOW);
         if a.ui.pl_open && !hpl.is_null() {
@@ -249,12 +261,12 @@ fn apply_region(a: &App) {
         unsafe { SetWindowRgn(a.hmain, null_mut(), 1) };
         return;
     }
-    let sc = a.scale;
+    let pct = a.pct;
     let mut pts = Vec::new();
     let mut counts = Vec::new();
     for poly in &a.skin.region {
         counts.push(poly.len() as i32);
-        pts.extend(poly.iter().map(|&(x, y)| POINT { x: x * sc, y: y * sc }));
+        pts.extend(poly.iter().map(|&(x, y)| POINT { x: phys(x, pct), y: phys(y, pct) }));
     }
     unsafe {
         let rgn = CreatePolyPolygonRgn(pts.as_ptr(), counts.as_ptr(), counts.len() as i32, WINDING);
@@ -273,7 +285,7 @@ fn window_rect(h: HWND) -> RECT {
 /// Where the playlist sits when docked under the main window.
 fn dock_pos(a: &App) -> (i32, i32) {
     let r = window_rect(a.hmain);
-    (r.left, r.top + main_h(a) * a.scale)
+    (r.left, r.top + phys(main_h(a), a.pct))
 }
 
 pub fn remember_positions(a: &mut App) {
@@ -290,7 +302,6 @@ pub fn remember_positions(a: &mut App) {
         a.ui.pl_x = p.left;
         a.ui.pl_y = p.top;
     }
-    a.ui.scale = a.scale;
 }
 
 pub fn toggle_playlist(a: &mut App) {
@@ -312,14 +323,64 @@ pub fn toggle_playlist(a: &mut App) {
     a.inv_main();
 }
 
-fn set_scale(a: &mut App, scale: i32) {
-    a.scale = scale;
-    a.ui.scale = scale;
+/// What a monitor's DPI calls normal size, rounded to the nearest offered step.
+fn auto_pct(dpi: u32) -> i32 {
+    ((dpi as i32 * 100 / 96 + 12) / 25 * 25).clamp(MIN_PCT, MAX_PCT)
+}
+
+fn monitor_dpi(pt: POINT) -> u32 {
     unsafe {
-        SetWindowPos(a.hmain, null_mut(), 0, 0, MAIN_W * scale, main_h(a) * scale, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let (mut x, mut y) = (0u32, 0u32);
+        if !mon.is_null() && GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut x, &mut y) == 0 && x > 0 {
+            x
+        } else {
+            GetDpiForSystem()
+        }
+    }
+}
+
+/// The size the user picked: a percentage, or 0 to follow the screen.
+fn choose_zoom(a: &mut App, choice: i32) {
+    a.ui.scale = if choice == 0 { 0 } else { choice.clamp(MIN_PCT, MAX_PCT) };
+    let pct = if a.ui.scale == 0 { a.auto_pct } else { a.ui.scale };
+    set_pct(a, pct);
+    a.flash(format!("Size: {pct}%"), false);
+}
+
+/// One step larger or smaller.
+fn zoom_step(a: &mut App, larger: bool) {
+    let next = if larger {
+        ZOOMS.iter().copied().find(|&z| z > a.pct)
+    } else {
+        ZOOMS.iter().rev().copied().find(|&z| z < a.pct)
+    };
+    if let Some(z) = next {
+        choose_zoom(a, if z == a.auto_pct { 0 } else { z });
+    }
+}
+
+/// Winamp's double size, relative to what the screen calls normal.
+fn toggle_double(a: &mut App) {
+    if a.doubled() {
+        choose_zoom(a, 0);
+    } else {
+        choose_zoom(a, (a.auto_pct * 2).min(MAX_PCT));
+    }
+}
+
+fn set_pct(a: &mut App, pct: i32) {
+    let pct = pct.clamp(MIN_PCT, MAX_PCT);
+    if pct == a.pct {
+        return;
+    }
+    a.pct = pct;
+    a.set_fonts();
+    unsafe {
+        SetWindowPos(a.hmain, null_mut(), 0, 0, phys(MAIN_W, pct), phys(main_h(a), pct), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         apply_region(a);
         if !a.hpl.is_null() {
-            let (w, h) = (a.ui.pl_w * scale, a.ui.pl_h * scale);
+            let (w, h) = (phys(a.ui.pl_w, pct), phys(a.ui.pl_h, pct));
             if a.ui.docked {
                 let (x, y) = dock_pos(a);
                 SetWindowPos(a.hpl, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -335,7 +396,7 @@ fn set_scale(a: &mut App, scale: i32) {
 fn toggle_shade(a: &mut App) {
     a.ui.shade = !a.ui.shade;
     unsafe {
-        SetWindowPos(a.hmain, null_mut(), 0, 0, MAIN_W * a.scale, main_h(a) * a.scale, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(a.hmain, null_mut(), 0, 0, phys(MAIN_W, a.pct), phys(main_h(a), a.pct), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
     apply_region(a);
     if a.ui.docked && a.ui.pl_open && !a.hpl.is_null() {
@@ -372,16 +433,56 @@ fn update_title(a: &App) {
     });
 }
 
-fn logical(lp: LPARAM, scale: i32) -> (i32, i32) {
+/// A mouse message's client position, in the skin's coordinates.
+fn mouse(lp: LPARAM, pct: i32) -> (i32, i32) {
     let x = (lp & 0xFFFF) as i16 as i32;
     let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
-    (x.div_euclid(scale), y.div_euclid(scale))
+    (logical(x, pct), logical(y, pct))
 }
 
-fn screen_to_logical(h: HWND, lp: LPARAM, scale: i32) -> (i32, i32) {
-    let mut p = POINT { x: (lp & 0xFFFF) as i16 as i32, y: ((lp >> 16) & 0xFFFF) as i16 as i32 };
+fn screen_point(lp: LPARAM) -> POINT {
+    POINT { x: (lp & 0xFFFF) as i16 as i32, y: ((lp >> 16) & 0xFFFF) as i16 as i32 }
+}
+
+fn screen_to_logical(h: HWND, lp: LPARAM, pct: i32) -> (i32, i32) {
+    let mut p = screen_point(lp);
     unsafe { ScreenToClient(h, &mut p) };
-    (p.x.div_euclid(scale), p.y.div_euclid(scale))
+    (logical(p.x, pct), logical(p.y, pct))
+}
+
+/// The mouse wheel goes to the window under the pointer (Windows sends it to the focused
+/// one). Notches are accumulated, so touchpads' small steps add up instead of vanishing.
+fn wheel(wp: WPARAM, lp: LPARAM) {
+    thread_local!(static ACC: std::cell::Cell<(i32, i32, i32)> = const { std::cell::Cell::new((0, 0, 0)) });
+    let Some(a) = app() else { return };
+    let delta = ((wp >> 16) & 0xFFFF) as i16 as i32;
+    let under = unsafe { GetAncestor(WindowFromPoint(screen_point(lp)), GA_ROOT) };
+    let (mut zoom, mut vol, mut rows) = ACC.with(|c| c.get());
+    if down(VK_CONTROL) {
+        zoom += delta;
+        while zoom.abs() >= 120 {
+            zoom_step(a, zoom > 0);
+            zoom -= 120 * zoom.signum();
+        }
+    } else if under == a.hpl && !a.hpl.is_null() {
+        rows += delta;
+        let n = rows / 40; // a notch is three rows
+        rows -= n * 40;
+        if n != 0 {
+            a.scroll(-n as i64);
+        }
+    } else {
+        vol += delta;
+        let n = vol / 60; // a notch is 2%
+        vol -= n * 60;
+        if n != 0 {
+            a.change_volume(n);
+        }
+    }
+    ACC.with(|c| c.set((zoom, vol, rows)));
+    if let Some(a) = app() {
+        a.reschedule();
+    }
 }
 
 fn paint(h: HWND, main: bool) {
@@ -389,24 +490,23 @@ fn paint(h: HWND, main: bool) {
     unsafe {
         let mut ps: PAINTSTRUCT = std::mem::zeroed();
         let hdc = BeginPaint(h, &mut ps);
-        let sc = a.scale;
-        let r = RECT { left: ps.rcPaint.left / sc, top: ps.rcPaint.top / sc,
-                       right: (ps.rcPaint.right + sc - 1) / sc, bottom: (ps.rcPaint.bottom + sc - 1) / sc };
+        let (pct, r) = (a.pct, ps.rcPaint);
         if main {
             let mut sf = std::mem::replace(&mut a.main_sf, Surface::empty());
+            sf.resize(MAIN_W, main_h(a), pct);
             draw_main(a, &mut sf);
-            sf.present(hdc, &r, sc);
+            sf.present(hdc, &r);
             a.main_sf = sf;
             update_title(a);
         } else {
             let mut sf = std::mem::replace(&mut a.pl_sf, Surface::empty());
-            if sf.w != a.ui.pl_w || sf.h != a.ui.pl_h || a.pl_full.replace(false) {
-                sf.resize(a.ui.pl_w, a.ui.pl_h);
+            if !sf.fits(a.ui.pl_w, a.ui.pl_h, pct) || a.pl_full.replace(false) {
+                sf.resize(a.ui.pl_w, a.ui.pl_h, pct);
                 draw_pl(a, &mut sf);
             } else {
                 draw_pl_clock(a, &mut sf);
             }
-            sf.present(hdc, &r, sc);
+            sf.present(hdc, &r);
             a.pl_sf = sf;
         }
         EndPaint(h, &ps);
@@ -441,12 +541,24 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             return 0;
         }
         WM_NCHITTEST => {
-            let (x, y) = screen_to_logical(h, lp, a.scale);
+            let (x, y) = screen_to_logical(h, lp, a.pct);
             return if matches!(main_hit(a, x, y), Hit::Drag) { HTCAPTION as LRESULT } else { HTCLIENT as LRESULT };
+        }
+        WM_DPICHANGED => {
+            // Moved to a monitor with another DPI: keep the place Windows suggests and, when
+            // following the screen, take its size.
+            let dpi = (wp & 0xFFFF) as u32;
+            a.auto_pct = auto_pct(dpi);
+            let r = &*(lp as *const RECT);
+            SetWindowPos(h, null_mut(), r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            if a.ui.scale == 0 {
+                set_pct(a, a.auto_pct);
+            }
+            return 0;
         }
         WM_NCLBUTTONDBLCLK => {
             // Double-clicking the title bar folds the window, as in Winamp (never maximises).
-            let (_, y) = screen_to_logical(h, lp, a.scale);
+            let (_, y) = screen_to_logical(h, lp, a.pct);
             if y < 14 {
                 toggle_shade(a);
             }
@@ -469,16 +581,31 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             }
         }
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
-            let (x, y) = logical(lp, a.scale);
+            let (x, y) = mouse(lp, a.pct);
             match main_hit(a, x, y) {
-                Hit::Button(id) => a.hold = Hold::Button(id),
+                Hit::Button(id) => {
+                    a.hold = Hold::Button(id);
+                    a.hold_inside = true;
+                }
                 Hit::Volume => {
+                    // Grabbing the thumb keeps it under the pointer; elsewhere it jumps there.
+                    let tx = vol_thumb_x(a);
+                    a.grab = if (tx..tx + 14).contains(&x) { x - tx } else { 7 };
                     a.hold = Hold::Volume;
-                    a.set_volume(volume_at(x));
+                    let v = volume_at(x - a.grab + 7);
+                    if a.volume() != Some(v) {
+                        a.set_volume(v);
+                    }
                 }
                 Hit::Seek => {
                     if let Some(d) = a.pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.duration_ms) {
-                        a.hold = Hold::Seek(seek_at(a, x, d));
+                        a.grab = match seek_thumb_x(a) {
+                            _ if a.ui.shade => 1,
+                            Some(tx) if (tx..tx + 29).contains(&x) => x - tx,
+                            _ => 14,
+                        };
+                        let at = if a.ui.shade { x } else { x - a.grab + 14 };
+                        a.hold = Hold::Seek(seek_at(a, at, d));
                     }
                 }
                 _ => {}
@@ -490,18 +617,31 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             return 0;
         }
         WM_MOUSEMOVE => {
-            let (x, _) = logical(lp, a.scale);
+            let (x, y) = mouse(lp, a.pct);
             match a.hold {
-                Hold::Volume => {
-                    let v = volume_at(x);
-                    if a.volume() != Some(v) {
-                        a.set_volume(v);
+                Hold::Button(id) => {
+                    // A held button looks pressed only while the pointer is on it.
+                    let inside = matches!(main_hit(a, x, y), Hit::Button(b) if b == id);
+                    if inside != a.hold_inside {
+                        a.hold_inside = inside;
+                        a.inv_main();
                     }
                 }
-                Hold::Seek(_) => {
+                Hold::Volume => {
+                    let v = volume_at(x - a.grab + 7);
+                    if a.volume() != Some(v) {
+                        a.set_volume(v);
+                        a.reschedule();
+                    }
+                }
+                Hold::Seek(old) => {
                     if let Some(d) = a.pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.duration_ms) {
-                        a.hold = Hold::Seek(seek_at(a, x, d));
-                        a.inv_all();
+                        let at = if a.ui.shade { x } else { x - a.grab + 14 };
+                        let pos = seek_at(a, at, d);
+                        if pos != old {
+                            a.hold = Hold::Seek(pos);
+                            a.inv_all();
+                        }
                     }
                 }
                 _ => {}
@@ -509,7 +649,7 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             return 0;
         }
         WM_LBUTTONUP => {
-            let (x, y) = logical(lp, a.scale);
+            let (x, y) = mouse(lp, a.pct);
             let hold = std::mem::replace(&mut a.hold, Hold::None);
             ReleaseCapture();
             match hold {
@@ -535,9 +675,7 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
         }
         WM_CONTEXTMENU => return 0,
         WM_MOUSEWHEEL => {
-            let delta = ((wp >> 16) & 0xFFFF) as i16 as i32;
-            a.change_volume(if delta > 0 { 2 } else { -2 });
-            a.reschedule();
+            wheel(wp, lp);
             return 0;
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
@@ -596,7 +734,7 @@ fn main_button(id: u32) {
         },
         B_CL_A => set_on_top(a, !a.ui.on_top),
         B_CL_I => song_info(),
-        B_CL_D => set_scale(a, if a.scale == 1 { 2 } else { 1 }),
+        B_CL_D => toggle_double(a),
         B_CL_V => a.flash("No visualizer: the engine doesn't share audio", false),
         B_TIME => {
             a.ui.remaining = !a.ui.remaining;
@@ -613,15 +751,16 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     if a.hpl.is_null() {
         return DefWindowProcW(h, msg, wp, lp);
     }
-    let sc = a.scale;
+    let pct = a.pct;
     match msg {
         WM_PAINT => {
             paint(h, false);
             return 0;
         }
+        WM_DPICHANGED => return 0, // the main window decides the size
         WM_ERASEBKGND => return 1,
         WM_NCHITTEST => {
-            let (x, y) = screen_to_logical(h, lp, sc);
+            let (x, y) = screen_to_logical(h, lp, pct);
             return match pl_hit(a, x, y) {
                 Hit::Drag => HTCAPTION as LRESULT,
                 Hit::Resize => HTBOTTOMRIGHT as LRESULT,
@@ -635,23 +774,23 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_GETMINMAXINFO => {
             let mm = &mut *(lp as *mut MINMAXINFO);
-            mm.ptMinTrackSize = POINT { x: 275 * sc, y: 116 * sc };
+            mm.ptMinTrackSize = POINT { x: phys(275, pct), y: phys(116, pct) };
             return 0;
         }
         WM_SIZING => {
             // Playlists grow in steps of 25x29, the size of the skin's tiles.
             let r = &mut *(lp as *mut RECT);
-            let w = ((r.right - r.left) / sc - 275 + 12).div_euclid(25).max(0) * 25 + 275;
-            let hgt = ((r.bottom - r.top) / sc - 116 + 14).div_euclid(29).max(0) * 29 + 116;
-            r.right = r.left + w * sc;
-            r.bottom = r.top + hgt * sc;
+            let w = (logical(r.right - r.left, pct) - 275 + 12).div_euclid(25).max(0) * 25 + 275;
+            let hgt = (logical(r.bottom - r.top, pct) - 116 + 14).div_euclid(29).max(0) * 29 + 116;
+            r.right = r.left + phys(w, pct);
+            r.bottom = r.top + phys(hgt, pct);
             return 1;
         }
         WM_SIZE => {
             let (w, hgt) = ((lp & 0xFFFF) as i32, ((lp >> 16) & 0xFFFF) as i32);
             if w > 0 && hgt > 0 {
-                a.ui.pl_w = (w / sc).max(275);
-                a.ui.pl_h = (hgt / sc).max(116);
+                a.ui.pl_w = logical(w, pct).max(275);
+                a.ui.pl_h = logical(hgt, pct).max(116);
                 a.scroll(0);
                 a.prefetch();
                 a.reschedule();
@@ -662,7 +801,7 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             // Snap to the bottom of the main window within 10 pixels, and dock there.
             let r = &mut *(lp as *mut RECT);
             let (dx, dy) = dock_pos(a);
-            let snap = 10 * sc;
+            let snap = phys(10, pct);
             if (r.left - dx).abs() < snap && (r.top - dy).abs() < snap {
                 let (w, hgt) = (r.right - r.left, r.bottom - r.top);
                 *r = RECT { left: dx, top: dy, right: dx + w, bottom: dy + hgt };
@@ -675,10 +814,11 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             a.ui.docked = r.left == dx && r.top == dy;
         }
         WM_LBUTTONDOWN => {
-            let (x, y) = logical(lp, sc);
+            let (x, y) = mouse(lp, pct);
             match pl_hit(a, x, y) {
                 Hit::Button(id) => {
                     a.hold = Hold::PlButton(id);
+                    a.hold_inside = true;
                     SetCapture(h);
                 }
                 Hit::Row(i) => {
@@ -705,7 +845,7 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return 0;
         }
         WM_LBUTTONDBLCLK => {
-            let (x, y) = logical(lp, sc);
+            let (x, y) = mouse(lp, pct);
             match pl_hit(a, x, y) {
                 Hit::Row(i) if i < a.cur_list().tracks.len() => {
                     a.cur_list_mut().sel = i;
@@ -719,8 +859,16 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return 0;
         }
         WM_MOUSEMOVE => {
+            if let Hold::PlButton(id) = a.hold {
+                let (x, y) = mouse(lp, pct);
+                let inside = matches!(pl_hit(a, x, y), Hit::Button(b) if b == id);
+                if inside != a.hold_inside {
+                    a.hold_inside = inside;
+                    a.inv_pl();
+                }
+            }
             if let Hold::PlScroll(grab) = a.hold {
-                let (_, y) = logical(lp, sc);
+                let (_, y) = mouse(lp, pct);
                 let (_, travel) = scroll_geometry(a);
                 let rows = pl_rows(a);
                 let l = a.cur_list_mut();
@@ -735,7 +883,7 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return 0;
         }
         WM_LBUTTONUP => {
-            let (x, y) = logical(lp, sc);
+            let (x, y) = mouse(lp, pct);
             let hold = std::mem::replace(&mut a.hold, Hold::None);
             ReleaseCapture();
             if let Hold::PlButton(id) = hold {
@@ -756,9 +904,7 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             }
         }
         WM_MOUSEWHEEL => {
-            let delta = ((wp >> 16) & 0xFFFF) as i16 as i64;
-            a.scroll(-delta / 40);
-            a.reschedule();
+            wheel(wp, lp);
             return 0;
         }
         WM_RBUTTONUP | WM_NCRBUTTONUP => {
@@ -789,10 +935,39 @@ fn pl_button(id: u32) {
     match id {
         P_CLOSE => toggle_playlist(a),
         P_SHADE => a.flash("Shade mode isn't in this version yet", false),
-        P_ADD | P_LIST | P_EJECT => library_menu(),
-        P_REM | P_SEL => {}
+        P_LIST | P_EJECT => library_menu(),
+        P_ADD => {
+            let cmd = popup(|a, m| {
+                let has = a.pb.as_ref().and_then(|p| p.track.as_ref()).is_some_and(|t| t.is_track());
+                add(m, M_SEARCH, "&Search Spotify...\tJ", false, true);
+                add(m, M_LIKE, "&Add the playing song to Liked Songs\tF", false, has && a.liked == Some(false));
+                sep(m);
+                library_items(a, m);
+            });
+            run_command(cmd);
+        }
+        P_REM => {
+            let cmd = popup(|a, m| {
+                let sel = a.cur == "liked" && a.selected().is_some();
+                add(m, M_UNLIKE_SEL, "Remove the &selected song from Liked Songs", false, sel);
+                add(m, M_LIKE, "Remove the &playing song from Liked Songs\tF", false, a.liked == Some(true));
+            });
+            run_command(cmd);
+        }
+        P_SEL => {
+            let cmd = popup(|a, m| {
+                add(m, M_JUMP, "&Jump to the playing song", false, a.pb.as_ref().is_some_and(|p| p.track.is_some()));
+                add(m, M_FIRST, "&First song\tHome", false, true);
+                add(m, M_LAST, "&Last song\tEnd", false, true);
+            });
+            run_command(cmd);
+        }
         P_MISC => {
-            a.reload();
+            let cmd = popup(|_, m| {
+                add(m, M_RELOAD, "&Reload\tF5", false, true);
+                add(m, M_INFO, "Song &info", false, true);
+            });
+            run_command(cmd);
         }
         P_PREV => a.skip(false),
         P_PLAY => a.play(),
@@ -848,7 +1023,10 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
     }
     let rows = pl_rows(a) as i64;
     match vk {
-        _ if ctrl && vk == b'D' as u16 => set_scale(a, if a.scale == 1 { 2 } else { 1 }),
+        _ if ctrl && vk == b'D' as u16 => toggle_double(a),
+        _ if ctrl && matches!(vk, VK_OEM_PLUS | VK_ADD) => zoom_step(a, true),
+        _ if ctrl && matches!(vk, VK_OEM_MINUS | VK_SUBTRACT) => zoom_step(a, false),
+        _ if ctrl && matches!(vk, 0x30 | VK_NUMPAD0) => choose_zoom(a, 0),
         _ if ctrl && vk == b'T' as u16 => set_on_top(a, !a.ui.on_top),
         _ if ctrl && vk == b'W' as u16 => toggle_shade(a),
         _ if ctrl && vk == b'F' as u16 => a.start_search(),
@@ -992,16 +1170,26 @@ fn main_menu() {
         sep(m);
         let liked = a.liked == Some(true) && a.pb.as_ref().and_then(|p| p.track.as_ref()).is_some_and(|t| a.liked_uri.as_deref() == Some(&t.uri));
         add(m, M_LIKE, "&Like this song\tF", liked, has_track);
-        let (shuffle, repeat) = a.pb.as_ref().map_or((false, Repeat::Off), |p| (p.shuffle, p.repeat));
-        add(m, M_SHUFFLE, "S&huffle\tS", shuffle, a.pb.is_some());
+        let (shuffle, repeat) = shuffle_repeat(a);
+        add(m, M_SHUFFLE, "S&huffle\tS", shuffle, true);
         let rep = CreatePopupMenu();
         for (i, (r, label)) in [(Repeat::Off, "Off"), (Repeat::Context, "All"), (Repeat::Track, "One")].into_iter().enumerate() {
-            add(rep, M_REPEAT + i, label, repeat == r, a.pb.is_some());
+            add(rep, M_REPEAT + i, label, repeat == r, true);
         }
         AppendMenuW(m, MF_POPUP | MF_STRING, rep as usize, wide_z("&Repeat\tR").as_ptr());
         sep(m);
         add(m, M_PLWIN, "Playlist &editor\tAlt+E", a.ui.pl_open, true);
-        add(m, M_DOUBLE, "Dou&ble size\tCtrl+D", a.scale > 1, true);
+        let size = CreatePopupMenu();
+        add(size, M_ZOOM_AUTO, &format!("&Match the screen ({}%)\tCtrl+0", a.auto_pct), a.ui.scale == 0, true);
+        sep(size);
+        for (i, z) in ZOOMS.iter().enumerate() {
+            add(size, M_ZOOM + i, &format!("{z}%"), a.ui.scale == *z, true);
+        }
+        sep(size);
+        add(size, M_ZOOM_IN, "&Larger\tCtrl++", false, a.pct < MAX_PCT);
+        add(size, M_ZOOM_OUT, "&Smaller\tCtrl+-", false, a.pct > MIN_PCT);
+        AppendMenuW(m, MF_POPUP | MF_STRING, size as usize, wide_z(&format!("Si&ze ({}%)", a.pct)).as_ptr());
+        add(m, M_DOUBLE, "Dou&ble size\tCtrl+D", a.doubled(), true);
         add(m, M_ONTOP, "Always on &top\tCtrl+T", a.ui.on_top, true);
         add(m, M_SHADE, "&Shade mode\tCtrl+W", a.ui.shade, true);
         add(m, M_SCROLL, "Scroll song t&itle", a.ui.scroll, true);
@@ -1046,7 +1234,15 @@ fn run_command(cmd: usize) {
         M_NEXT => a.skip(true),
         M_PREV => a.skip(false),
         M_PLWIN => toggle_playlist(a),
-        M_DOUBLE => set_scale(a, if a.scale == 1 { 2 } else { 1 }),
+        M_DOUBLE => toggle_double(a),
+        M_ZOOM_AUTO => choose_zoom(a, 0),
+        M_ZOOM_IN => zoom_step(a, true),
+        M_ZOOM_OUT => zoom_step(a, false),
+        M_UNLIKE_SEL => a.unlike_selected(),
+        M_JUMP => a.jump_to_playing(),
+        M_FIRST => a.move_sel(-1_000_000),
+        M_LAST => a.move_sel(1_000_000),
+        M_INFO => song_info(),
         M_ONTOP => set_on_top(a, !a.ui.on_top),
         M_SHADE => toggle_shade(a),
         M_SCROLL => {
@@ -1076,6 +1272,7 @@ fn run_command(cmd: usize) {
         M_EXIT => unsafe {
             PostMessageW(a.hmain, WM_CLOSE, 0, 0);
         },
+        c if (M_ZOOM..M_ZOOM + ZOOMS.len()).contains(&c) => choose_zoom(a, ZOOMS[c - M_ZOOM]),
         c if (M_REPEAT..M_REPEAT + 3).contains(&c) => a.set_repeat([Repeat::Off, Repeat::Context, Repeat::Track][c - M_REPEAT]),
         c if (M_PLAYLIST..M_PLAYLIST + 900).contains(&c) => a.open_playlist(c - M_PLAYLIST),
         c if (M_DEVICE..M_DEVICE + 50).contains(&c) => a.transfer(c - M_DEVICE),
@@ -1093,7 +1290,8 @@ fn about() {
          Skin: Winamp5 Classified v5.5 by Sven Kistner, Zarko Jovic, GuidoD and Wildrose-Wally.\n\n\
          Keys: Z X C V B (prev, play, pause, stop, next), arrows seek and change volume,\n\
          S shuffle, R repeat, F like, D devices, L library, J or / search, Ctrl+D double size,\n\
-         Ctrl+T always on top, Alt+E playlist, F5 reload.",
+         Ctrl +/- or Ctrl+wheel resize, Ctrl+0 match the screen, Ctrl+T always on top,\n\
+         Ctrl+W shade, Alt+E playlist, F5 reload.",
         env!("CARGO_PKG_VERSION"));
     unsafe { MessageBoxW(owner, wide_z(&text).as_ptr(), wide_z("About SpoTermAmp").as_ptr(), MB_OK | MB_ICONINFORMATION) };
 }
@@ -1226,11 +1424,9 @@ fn snapshot(dir: &str) -> i32 {
             return 1;
         }
     };
-    let pl_font = gfx::make_font(&sk.pl.font, 10, false);
-    let small_font = gfx::make_font(&sk.pl.font, 9, false);
     let s = config::load();
     let ui = config::UiState { pl_w: 275, pl_h: 232, ..Default::default() };
-    let mut a = App::new(s, ui, sk, Engine::new(Default::default()), pl_font, small_font, 1);
+    let mut a = App::new(s, ui, sk, Engine::new(Default::default()), 100, 100);
     a.local = true;
     let tracks: Vec<Rc<spotify::Track>> = (0..30)
         .map(|i| Rc::new(spotify::Track {
@@ -1262,16 +1458,23 @@ fn snapshot(dir: &str) -> i32 {
         repeat: Repeat::Off,
         context_uri: None,
     });
-    let mut main_sf = Surface::new(MAIN_W, MAIN_H);
-    draw_main(&mut a, &mut main_sf);
-    let mut pl_sf = Surface::new(275, 232);
-    draw_pl(&mut a, &mut pl_sf);
-    a.ui.shade = true;
-    let mut shade_sf = Surface::new(MAIN_W, SHADE_H);
-    draw_main(&mut a, &mut shade_sf);
-    let ok = write_bmp(&format!("{dir}/main.bmp"), MAIN_W, MAIN_H, &main_sf.pixels())
-        && write_bmp(&format!("{dir}/pl.bmp"), 275, 232, &pl_sf.pixels())
-        && write_bmp(&format!("{dir}/shade.bmp"), MAIN_W, SHADE_H, &shade_sf.pixels());
+    let mut ok = true;
+    for pct in [100, 125, 200] {
+        a.pct = pct;
+        a.set_fonts();
+        a.ui.shade = false;
+        let mut main_sf = Surface::new(MAIN_W, MAIN_H, pct);
+        draw_main(&mut a, &mut main_sf);
+        let mut pl_sf = Surface::new(275, 232, pct);
+        draw_pl(&mut a, &mut pl_sf);
+        a.ui.shade = true;
+        let mut shade_sf = Surface::new(MAIN_W, SHADE_H, pct);
+        draw_main(&mut a, &mut shade_sf);
+        let name = |n: &str| if pct == 100 { format!("{dir}/{n}.bmp") } else { format!("{dir}/{n}_{pct}.bmp") };
+        ok &= write_bmp(&name("main"), main_sf.w, main_sf.h, &main_sf.pixels())
+            && write_bmp(&name("pl"), pl_sf.w, pl_sf.h, &pl_sf.pixels())
+            && write_bmp(&name("shade"), shade_sf.w, shade_sf.h, &shade_sf.pixels());
+    }
     std::mem::forget(a); // no engine, no windows: nothing to clean up
     if ok { 0 } else { 1 }
 }

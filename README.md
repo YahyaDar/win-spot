@@ -80,10 +80,14 @@ top, shade mode, sign-in. Double-click a song to play it.
 | `d` | Devices: move playback to another device, or back here |
 | `s` `r` `f` | Shuffle, repeat (off, all, one), like the current song |
 | `ctrl+d` `ctrl+t` `ctrl+w` `alt+e` | Double size, always on top, shade mode, show/hide the playlist |
+| `ctrl` `+` `-` `0`, `ctrl`+wheel | Larger, smaller, match the screen |
 | `F5` | Reload (and retry the player now if it's offline) |
 
-Clicking the clock switches between elapsed and remaining time. The mouse wheel changes
-the volume over the main window and scrolls the playlist. Drag the playlist's
+It opens at the size your screen's scaling calls normal (125% on a 125% display) and
+follows you between monitors with different scaling. Right-click > Size picks anything
+from 100% to 300%; the skin stays pixel-sharp and the playlist's text is drawn at the real
+size, so it's crisp at every size. Clicking the clock switches between elapsed and remaining time. The mouse wheel changes
+the volume over the main window and scrolls the playlist: whichever window the pointer is over, not the focused one. Drag the playlist's
 bottom-right corner to resize it; drag it under the main window and it docks there and
 moves with it. Window positions and options are saved in `amp.cfg` in the config folder.
 Spotify has no equalizer and the engine shares no audio, so the EQ and visualizer

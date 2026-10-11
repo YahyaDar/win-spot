@@ -137,7 +137,29 @@ pub fn main_hit(app: &App, x: i32, y: i32) -> Hit {
     if inside(x, y, 16, 72, 248, 10) {
         return Hit::Seek;
     }
+    if inside(x, y, 177, 57, 38, 13) {
+        return Hit::Nothing;
+    }
     Hit::Drag
+}
+
+/// The volume thumb's left edge.
+pub fn vol_thumb_x(app: &App) -> i32 {
+    107 + app.volume().unwrap_or(0) as i32 * 54 / 100
+}
+
+/// The position thumb's left edge, while something is loaded.
+pub fn seek_thumb_x(app: &App) -> Option<i32> {
+    let pb = app.pb.as_ref()?;
+    let t = pb.track.as_ref()?;
+    let pos = match app.hold { Hold::Seek(p) => p, _ => pb.progress(Instant::now()) };
+    let x = if t.duration_ms > 0 { (pos as u64 * 219 / t.duration_ms as u64) as i32 } else { 0 };
+    Some(16 + x.min(219))
+}
+
+/// Shuffle and repeat as shown: the player's, or what the first play will use.
+pub fn shuffle_repeat(app: &App) -> (bool, Repeat) {
+    app.pb.as_ref().map_or((app.pref_shuffle, app.pref_repeat), |p| (p.shuffle, p.repeat))
 }
 
 /// The volume a click or drag at `x` means.
@@ -157,7 +179,7 @@ pub fn seek_at(app: &App, x: i32, dur: u32) -> u32 {
 fn draw_shade(app: &mut App, sf: &mut Surface, now: Instant) {
     let sk = &app.skin;
     let tb = sk.titlebar.as_ref();
-    let pressed = |id: u32| app.hold == Hold::Button(id);
+    let pressed = |id: u32| app.hold == Hold::Button(id) && app.hold_inside;
     sf.blit(tb, 27, if app.main_active { 29 } else { 42 }, MAIN_W, SHADE_H, 0, 0);
     if pressed(B_OPTIONS) { sf.blit(tb, 0, 9, 9, 9, 6, 3); }
     if pressed(B_MIN) { sf.blit(tb, 9, 9, 9, 9, 244, 3); }
@@ -184,7 +206,7 @@ pub fn draw_main(app: &mut App, sf: &mut Surface) {
     if app.ui.shade {
         return draw_shade(app, sf, now);
     }
-    let pressed = |id: u32| app.hold == Hold::Button(id);
+    let pressed = |id: u32| app.hold == Hold::Button(id) && app.hold_inside;
     sf.blit(sk.main.as_ref(), 0, 0, MAIN_W, MAIN_H, 0, 0);
 
     // Title bar and its buttons.
@@ -200,7 +222,7 @@ pub fn draw_main(app: &mut App, sf: &mut Surface) {
     if pressed(B_CL_O) { sf.blit(tb, 304, 47, 8, 8, 10, 25); }
     if app.ui.on_top || pressed(B_CL_A) { sf.blit(tb, 312, 55, 8, 7, 10, 33); }
     if pressed(B_CL_I) { sf.blit(tb, 320, 62, 8, 7, 10, 40); }
-    if app.scale > 1 || pressed(B_CL_D) { sf.blit(tb, 328, 69, 8, 8, 10, 47); }
+    if app.doubled() || pressed(B_CL_D) { sf.blit(tb, 328, 69, 8, 8, 10, 47); }
 
     let pb = app.pb.as_ref();
     let track = pb.and_then(|p| p.track.as_ref());
@@ -254,24 +276,22 @@ pub fn draw_main(app: &mut App, sf: &mut Surface) {
     let sk = &app.skin;
     let pb = app.pb.as_ref();
     let track = pb.and_then(|p| p.track.as_ref());
-    let pressed = |id: u32| app.hold == Hold::Button(id);
+    let pressed = |id: u32| app.hold == Hold::Button(id) && app.hold_inside;
 
     // Volume and balance.
     let vol = app.volume().unwrap_or(0) as i32;
     let frame = (vol * 27 + 50) / 100;
     sf.blit(sk.volume.as_ref(), 0, frame * 15, 68, 13, 107, 57);
     let vthumb = if app.hold == Hold::Volume { 0 } else { 15 };
-    sf.blit(sk.volume.as_ref(), vthumb, 422, 14, 11, 107 + vol * 54 / 100, 58);
+    sf.blit(sk.volume.as_ref(), vthumb, 422, 14, 11, vol_thumb_x(app), 58);
     sf.blit(sk.balance.as_ref(), 9, 0, 38, 13, 177, 57);
     sf.blit(sk.balance.as_ref(), 15, 422, 14, 11, 177 + 12, 58);
 
     // Position bar: only while something is loaded.
-    if let Some(t) = track {
+    if let (Some(_), Some(x)) = (track, seek_thumb_x(app)) {
         sf.blit(sk.posbar.as_ref(), 0, 0, 248, 10, 16, 72);
-        let pos = match app.hold { Hold::Seek(p) => p, _ => pb.map_or(0, |p| p.progress(now)) };
-        let x = if t.duration_ms > 0 { (pos as u64 * 219 / t.duration_ms as u64) as i32 } else { 0 };
         let sx = if matches!(app.hold, Hold::Seek(_)) { 278 } else { 248 };
-        sf.blit(sk.posbar.as_ref(), sx, 0, 29, 10, 16 + x.min(219), 72);
+        sf.blit(sk.posbar.as_ref(), sx, 0, 29, 10, x, 72);
     }
 
     // Transport buttons.
@@ -283,7 +303,7 @@ pub fn draw_main(app: &mut App, sf: &mut Surface) {
 
     // Shuffle, repeat, EQ and PL toggles.
     let sr = sk.shufrep.as_ref();
-    let (shuffle, repeat) = pb.map_or((false, Repeat::Off), |p| (p.shuffle, p.repeat));
+    let (shuffle, repeat) = shuffle_repeat(app);
     sf.blit(sr, 28, (shuffle as i32) * 30 + (pressed(B_SHUFFLE) as i32) * 15, 47, 15, 164, 89);
     sf.blit(sr, 0, ((repeat != Repeat::Off) as i32) * 30 + (pressed(B_REPEAT) as i32) * 15, 28, 15, 210, 89);
     sf.blit(sr, if pressed(B_EQ) { 46 } else { 0 }, 61, 23, 12, 219, 58);
@@ -322,42 +342,24 @@ fn draw_marquee(app: &mut App, sf: &mut Surface) {
         let w16 = wide(&text);
         let tw = sf.text_width(&w16);
         app.marquee_scrolls = tw > W;
-        let rect = |x: i32| RECT { left: x, top: 24, right: X + W, bottom: 36 };
+        let clip = RECT { left: X, top: 24, right: X + W, bottom: 36 };
         if !app.marquee_scrolls {
-            clip_gdi(sf, &w16, rect(X), X, app.skin.text_fg);
+            sf.text_clipped(&w16, X, clip, app.skin.text_fg);
             return;
         }
         let looped = wide(&format!("{text}   ***   "));
-        let cycle = sf.text_width(&looped);
-        let off = app.marquee_px.rem_euclid(cycle.max(1));
+        let cycle = sf.text_width(&looped).max(1);
+        let off = app.marquee_px.rem_euclid(cycle);
         app.marquee_px = off;
-        clip_gdi(sf, &looped, rect(X - off), X, app.skin.text_fg);
+        sf.text_clipped(&looped, X - off, clip, app.skin.text_fg);
         if cycle - off < W {
-            clip_gdi(sf, &looped, rect(X + cycle - off), X, app.skin.text_fg);
+            sf.text_clipped(&looped, X + cycle - off, clip, app.skin.text_fg);
         }
     }
 }
 
 fn sf_clip_text(sf: &mut Surface, app: &App, s: &str, x: i32, w: i32) {
     bitmap_text(sf, app.skin.text.as_ref(), s, x, 27, 0, w);
-}
-
-/// GDI text that starts left of the marquee is clipped to it.
-fn clip_gdi(sf: &mut Surface, s: &[u16], mut r: RECT, clip_left: i32, color: u32) {
-    if r.left >= clip_left {
-        sf.text(s, r, color, DT_LEFT);
-        return;
-    }
-    // DrawText can't start left of its rectangle, so draw with a negative-offset clip.
-    unsafe {
-        use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SelectClipRgn};
-        let rgn = CreateRectRgn(clip_left, r.top, r.right, r.bottom);
-        SelectClipRgn(sf.dc, rgn);
-        r.right = r.left + 4000;
-        sf.text(s, r, color, DT_LEFT);
-        SelectClipRgn(sf.dc, std::ptr::null_mut());
-        DeleteObject(rgn);
-    }
 }
 
 // ── Playlist window ──────────────────────────────────────────────────────────
@@ -412,7 +414,7 @@ pub fn draw_pl(app: &mut App, sf: &mut Surface) {
     let (w, h) = (app.ui.pl_w, app.ui.pl_h);
     let sk = &app.skin;
     let pe = sk.pledit.as_ref();
-    let pressed = |id: u32| app.hold == Hold::PlButton(id);
+    let pressed = |id: u32| app.hold == Hold::PlButton(id) && app.hold_inside;
     let ty = if app.pl_active { 0 } else { 21 };
 
     // Frame: top row, sides, bottom row.
@@ -430,11 +432,6 @@ pub fn draw_pl(app: &mut App, sf: &mut Surface) {
     sf.tile(pe, 179, 0, 25, 38, 125, h - 38, w - 275, 38);
     sf.blit(pe, 126, 72, 150, 38, w - 150, h - 38);
 
-    // The bottom bar's menu buttons, pressed.
-    for (id, sx, sy, x) in [(P_ADD, 23, 149, 14), (P_REM, 77, 149, 43), (P_SEL, 127, 149, 72), (P_MISC, 177, 149, 101)] {
-        if pressed(id) { sf.blit(pe, sx, sy, 22, 18, x, h - 30); }
-    }
-    if pressed(P_LIST) { sf.blit(pe, 227, 111, 22, 18, w - 44, h - 30); }
 
     // List area.
     let pl = &sk.pl;
