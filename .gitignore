@@ -11,8 +11,9 @@
 __pycache__/
 *.pyc
 
-# Rust engine build output
+# Rust build output
 engine/target/
+amp/target/
 
 # Packaging (build.ps1)
 .venv-build/

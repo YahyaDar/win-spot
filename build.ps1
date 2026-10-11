@@ -1,15 +1,16 @@
 <#
 .SYNOPSIS
-  Builds the Windows release: dist\SpoTerm\SpoTerm.exe and dist\SpoTerm-<version>-windows-x64.zip.
+  Builds the Windows release: dist\SpoTerm\ (SpoTerm.exe, SpoTermAmp.exe, the engine) and
+  dist\SpoTerm-<version>-windows-x64.zip.
 
 .DESCRIPTION
-  1. Builds spoterm-engine (Rust) in release mode from Cargo.lock.
+  1. Builds spoterm-engine and SpoTermAmp (Rust) in release mode from their Cargo.lock.
   2. Freezes the Python UI with PyInstaller (one folder, no UPX) in a private venv.
-  3. Puts the engine next to SpoTerm.exe, zips the folder and writes its SHA-256.
+  3. Puts the engine and SpoTermAmp next to SpoTerm.exe, zips the folder and writes its SHA-256.
 
   Needs Rust (rustup) and Python 3.10+. Run from anywhere:
     powershell -ExecutionPolicy Bypass -File build.ps1
-  -SkipEngine reuses an existing engine\target\release\spoterm-engine.exe.
+  -SkipEngine reuses existing engine and SpoTermAmp builds.
 #>
 param([switch]$SkipEngine)
 
@@ -27,8 +28,9 @@ function Invoke-Checked([string]$what, [scriptblock]$cmd) {
 $version = (Select-String -Path (Join-Path $root "spoterm\__init__.py") -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
 Write-Host "Building SpoTerm $version" -ForegroundColor Green
 
-# -- 1. Engine --
+# -- 1. Engine and SpoTermAmp --
 $engineExe = Join-Path $root "engine\target\release\spoterm-engine.exe"
+$ampExe = Join-Path $root "amp\target\release\SpoTermAmp.exe"
 if (-not $SkipEngine) {
     # The GNU toolchain links only DLLs that ship with Windows. With MSVC, link the C
     # runtime statically so users don't need the Visual C++ redistributable.
@@ -39,15 +41,18 @@ if (-not $SkipEngine) {
     } else {
         $env:RUSTFLAGS = "-C target-feature=+crt-static"
     }
-    Push-Location (Join-Path $root "engine")
     try {
-        Invoke-Checked "cargo build" { cargo @toolchain build --release --locked }
+        foreach ($crate in "engine", "amp") {
+            Push-Location (Join-Path $root $crate)
+            try { Invoke-Checked "cargo build ($crate)" { cargo @toolchain build --release --locked } }
+            finally { Pop-Location }
+        }
     } finally {
-        Pop-Location
         Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
     }
 }
 if (-not (Test-Path $engineExe)) { throw "No engine at $engineExe; run without -SkipEngine" }
+if (-not (Test-Path $ampExe)) { throw "No SpoTermAmp at $ampExe; run without -SkipEngine" }
 
 # -- 2. Python UI --
 $py = Join-Path $venv "Scripts\python.exe"
@@ -72,12 +77,18 @@ Invoke-Checked "PyInstaller" {
 
 # -- 3. Assemble and zip --
 Copy-Item $engineExe $app
+Copy-Item $ampExe $app
 Copy-Item (Join-Path $root "README.md") $app
 Copy-Item (Join-Path $root ".env.example") $app
 
 # Smoke test: the frozen app starts and finds its bundled modules.
 $out = & (Join-Path $app "SpoTerm.exe") --version
 if ($LASTEXITCODE -ne 0 -or $out -notmatch [regex]::Escape($version)) { throw "SpoTerm.exe --version failed: $out" }
+# SpoTermAmp draws both windows from its built-in skin without opening any (no window, no engine).
+$snap = Join-Path $work "amp-snapshot"
+New-Item -ItemType Directory -Force $snap | Out-Null
+$p = Start-Process -FilePath (Join-Path $app "SpoTermAmp.exe") -ArgumentList "--snapshot", "`"$snap`"" -Wait -PassThru
+if ($p.ExitCode -ne 0 -or -not (Test-Path (Join-Path $snap "main.bmp"))) { throw "SpoTermAmp.exe --snapshot failed (exit $($p.ExitCode))" }
 
 $zip = Join-Path $dist "SpoTerm-$version-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
@@ -92,5 +103,6 @@ Set-Content -Path "$zip.sha256" -Value "$hash  $(Split-Path -Leaf $zip)" -Encodi
 Write-Host ""
 Write-Host "Done:" -ForegroundColor Green
 Write-Host "  $app\SpoTerm.exe"
+Write-Host "  $app\SpoTermAmp.exe"
 Write-Host "  $zip"
 Write-Host "  sha256 $hash"

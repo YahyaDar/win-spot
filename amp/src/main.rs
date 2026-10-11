@@ -1,0 +1,1296 @@
+//! SpoTermAmp: SpoTerm's second face, a classic Winamp-skinned window.
+//!
+//! The same `spoterm-engine` that the terminal UI drives plays the audio and makes the
+//! Web API calls; this process is only a window. It is plain Win32 and GDI with no UI
+//! framework: two popup windows drawn from the skin's bitmaps into 1x back buffers and
+//! stretched to double size when asked, one timer that is only armed when something is
+//! due, and an engine pipe read by one blocking thread.
+
+#![windows_subsystem = "windows"]
+
+mod app;
+mod config;
+mod engine;
+mod gfx;
+mod skin;
+mod spotify;
+mod view;
+
+use std::ptr::{null, null_mut};
+use std::time::Instant;
+
+use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::Gdi::*;
+use windows_sys::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+use app::{App, Hold, Phase};
+use engine::{Engine, WM_ENGINE, WM_TASK};
+use gfx::{wide_z, Surface};
+use spotify::Repeat;
+use view::*;
+
+const MAIN_CLASS: &str = "SpoTermAmpMain";
+const PL_CLASS: &str = "SpoTermAmpPlaylist";
+const DASHBOARD: &str = "https://developer.spotify.com/dashboard";
+
+// Menu commands.
+const M_LIKED: usize = 1000;
+const M_SEARCH: usize = 1001;
+const M_RELOAD: usize = 1002;
+const M_PLAYLIST: usize = 1100; // + index
+const M_DEVICES: usize = 3000;
+const M_DEVICE: usize = 3100; // + index
+const M_LIKE: usize = 4000;
+const M_SHUFFLE: usize = 4001;
+const M_REPEAT: usize = 4010; // + 0 off, 1 all, 2 one
+const M_PLWIN: usize = 4020;
+const M_DOUBLE: usize = 4021;
+const M_ONTOP: usize = 4022;
+const M_SCROLL: usize = 4023;
+const M_REMAINING: usize = 4024;
+const M_SHADE: usize = 4025;
+const M_RETRY: usize = 4030;
+const M_SIGNIN: usize = 4031;
+const M_SIGNIN_PLAYER: usize = 4032;
+const M_ABOUT: usize = 4040;
+const M_EXIT: usize = 4041;
+const M_FOLDER: usize = 4050;
+const M_PLAY: usize = 4060;
+const M_PAUSE: usize = 4061;
+const M_STOP: usize = 4062;
+const M_NEXT: usize = 4063;
+const M_PREV: usize = 4064;
+
+// The app lives on the UI thread for the whole run; window procedures reach it here.
+static mut APP: *mut App = null_mut();
+
+fn app() -> Option<&'static mut App> {
+    unsafe { APP.as_mut() }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--snapshot") {
+        std::process::exit(snapshot(args.get(1).map_or(".", String::as_str)));
+    }
+    if args.first().is_some_and(|a| a == "--version" || a == "-V") {
+        message(&format!("SpoTermAmp {}", env!("CARGO_PKG_VERSION")), false);
+        return;
+    }
+    unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // One window at a time: a second launch brings the first one forward.
+        CreateMutexW(null(), 0, wide_z("SpoTermAmp.single").as_ptr());
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let h = FindWindowW(wide_z(MAIN_CLASS).as_ptr(), null());
+            if !h.is_null() {
+                ShowWindow(h, SW_RESTORE);
+                SetForegroundWindow(h);
+            }
+            return;
+        }
+    }
+
+    let mut s = config::load();
+    if !config::valid_client_id(&s.client_id) {
+        match ask_client_id() {
+            Some(cid) => {
+                if let Err(e) = config::save_client_id(&cid) {
+                    message(&format!("Couldn't save the Client ID: {e}"), true);
+                    return;
+                }
+                s = config::load();
+                if s.client_id != cid {
+                    s.client_id = cid; // an invalid one elsewhere still wins the lookup
+                }
+            }
+            None => return,
+        }
+    }
+    let Some(bin) = config::find_engine(&s.engine_bin) else {
+        message(&format!("{} is missing. Keep it next to SpoTermAmp.exe (or build it: cd engine && cargo build --release).", config::ENGINE_EXE), true);
+        return;
+    };
+    let skin = match skin::Skin::load(skin::DEFAULT) {
+        Ok(sk) => sk,
+        Err(e) => {
+            message(&format!("The skin couldn't be loaded: {e}"), true);
+            return;
+        }
+    };
+
+    let ui = config::load_state();
+    let scale = if ui.scale > 0 { ui.scale } else if unsafe { GetDpiForSystem() } >= 144 { 2 } else { 1 };
+    let pl_font = gfx::make_font(&skin.pl.font, 10, false);
+    let small_font = gfx::make_font(&skin.pl.font, 9, false);
+    let a = Box::new(App::new(s, ui, skin, Engine::new(bin), pl_font, small_font, scale));
+    unsafe { APP = Box::into_raw(a) };
+
+    if !create_windows() {
+        message("Couldn't create the window.", true);
+        return;
+    }
+    if let Some(a) = app() {
+        a.begin();
+        a.reschedule();
+    }
+
+    unsafe {
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if let Some(a) = app() {
+            a.engine.cancel_sign_in();
+            a.engine.stop();
+        }
+        // The engine stops with its pipe; everything else goes with the process.
+    }
+}
+
+fn message(text: &str, error: bool) {
+    unsafe {
+        MessageBoxW(null_mut(), wide_z(text).as_ptr(), wide_z("SpoTermAmp").as_ptr(),
+                    if error { MB_ICONERROR } else { MB_ICONINFORMATION } | MB_OK);
+    }
+}
+
+// ── Windows ──────────────────────────────────────────────────────────────────
+fn create_windows() -> bool {
+    let Some(a) = app() else { return false };
+    unsafe {
+        let hinst = GetModuleHandleW(null());
+        let icon = make_icon(a);
+        let procs: [(&str, WNDPROC); 2] = [(MAIN_CLASS, Some(main_proc)), (PL_CLASS, Some(pl_proc))];
+        for (name, proc_) in procs {
+            let cls = wide_z(name);
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                style: CS_DBLCLKS,
+                lpfnWndProc: proc_,
+                hInstance: hinst,
+                hIcon: icon,
+                hIconSm: icon,
+                hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+                lpszClassName: cls.as_ptr(),
+                ..std::mem::zeroed()
+            };
+            RegisterClassExW(&wc);
+        }
+        let sc = a.scale;
+        let (mut x, mut y) = (a.ui.x, a.ui.y);
+        if x == i32::MIN || !on_screen(x, y) {
+            x = (GetSystemMetrics(SM_CXSCREEN) - MAIN_W * sc) / 2;
+            y = (GetSystemMetrics(SM_CYSCREEN) - (main_h(a) + a.ui.pl_h) * sc) / 3;
+        }
+        let ex = if a.ui.on_top { WS_EX_TOPMOST } else { 0 } | WS_EX_APPWINDOW;
+        let hmain = CreateWindowExW(ex, wide_z(MAIN_CLASS).as_ptr(), wide_z("SpoTermAmp").as_ptr(),
+                                    WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX, x, y, MAIN_W * sc, main_h(a) * sc,
+                                    null_mut(), null_mut(), hinst, null());
+        if hmain.is_null() {
+            return false;
+        }
+        a.hmain = hmain;
+        apply_region(a);
+        let (px, py) = if a.ui.docked || !on_screen(a.ui.pl_x, a.ui.pl_y) { (x, y + main_h(a) * sc) } else { (a.ui.pl_x, a.ui.pl_y) };
+        // Owned by the main window: no taskbar button of its own, minimised with it.
+        let hpl = CreateWindowExW(if a.ui.on_top { WS_EX_TOPMOST } else { 0 }, wide_z(PL_CLASS).as_ptr(), wide_z("SpoTermAmp Playlist").as_ptr(),
+                                  WS_POPUP, px, py, a.ui.pl_w * sc, a.ui.pl_h * sc, hmain, null_mut(), hinst, null());
+        a.hpl = hpl;
+        ShowWindow(hmain, SW_SHOW);
+        if a.ui.pl_open && !hpl.is_null() {
+            ShowWindow(hpl, SW_SHOWNOACTIVATE);
+        }
+        SetForegroundWindow(hmain);
+    }
+    true
+}
+
+fn on_screen(x: i32, y: i32) -> bool {
+    unsafe {
+        let (vx, vy) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+        let (vw, vh) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+        x >= vx - 100 && y >= vy - 10 && x < vx + vw - 50 && y < vy + vh - 30
+    }
+}
+
+/// The window icon, cut from the skin (the logo in the bottom-right corner of main.bmp).
+fn make_icon(a: &App) -> HICON {
+    let Some(m) = a.skin.main.as_ref() else { return null_mut() };
+    let (sx, sy) = (250, 89);
+    let mut px = vec![0u32; 32 * 32];
+    for y in 0..32 {
+        for x in 0..32 {
+            px[(y * 32 + x) as usize] = m.at(sx + x / 2, sy + y / 2).unwrap_or(0) | 0xFF00_0000;
+        }
+    }
+    unsafe {
+        let color = CreateBitmap(32, 32, 1, 32, px.as_ptr() as _);
+        let mask = CreateBitmap(32, 32, 1, 1, vec![0u8; 32 * 4].as_ptr() as _);
+        let info = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+        let icon = CreateIconIndirect(&info);
+        DeleteObject(color);
+        DeleteObject(mask);
+        icon
+    }
+}
+
+/// Shape the main window by the skin's region.txt (rounded corners).
+fn apply_region(a: &App) {
+    if a.skin.region.is_empty() || a.ui.shade {
+        unsafe { SetWindowRgn(a.hmain, null_mut(), 1) };
+        return;
+    }
+    let sc = a.scale;
+    let mut pts = Vec::new();
+    let mut counts = Vec::new();
+    for poly in &a.skin.region {
+        counts.push(poly.len() as i32);
+        pts.extend(poly.iter().map(|&(x, y)| POINT { x: x * sc, y: y * sc }));
+    }
+    unsafe {
+        let rgn = CreatePolyPolygonRgn(pts.as_ptr(), counts.as_ptr(), counts.len() as i32, WINDING);
+        if !rgn.is_null() && SetWindowRgn(a.hmain, rgn, 1) == 0 {
+            DeleteObject(rgn);
+        }
+    }
+}
+
+fn window_rect(h: HWND) -> RECT {
+    let mut r: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetWindowRect(h, &mut r) };
+    r
+}
+
+/// Where the playlist sits when docked under the main window.
+fn dock_pos(a: &App) -> (i32, i32) {
+    let r = window_rect(a.hmain);
+    (r.left, r.top + main_h(a) * a.scale)
+}
+
+pub fn remember_positions(a: &mut App) {
+    unsafe {
+        if IsIconic(a.hmain) != 0 {
+            return;
+        }
+    }
+    let r = window_rect(a.hmain);
+    a.ui.x = r.left;
+    a.ui.y = r.top;
+    if !a.hpl.is_null() {
+        let p = window_rect(a.hpl);
+        a.ui.pl_x = p.left;
+        a.ui.pl_y = p.top;
+    }
+    a.ui.scale = a.scale;
+}
+
+pub fn toggle_playlist(a: &mut App) {
+    a.ui.pl_open = !a.ui.pl_open;
+    if a.hpl.is_null() {
+        return;
+    }
+    unsafe {
+        if a.ui.pl_open {
+            if a.ui.docked {
+                let (x, y) = dock_pos(a);
+                SetWindowPos(a.hpl, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            ShowWindow(a.hpl, SW_SHOWNOACTIVATE);
+        } else {
+            ShowWindow(a.hpl, SW_HIDE);
+        }
+    }
+    a.inv_main();
+}
+
+fn set_scale(a: &mut App, scale: i32) {
+    a.scale = scale;
+    a.ui.scale = scale;
+    unsafe {
+        SetWindowPos(a.hmain, null_mut(), 0, 0, MAIN_W * scale, main_h(a) * scale, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        apply_region(a);
+        if !a.hpl.is_null() {
+            let (w, h) = (a.ui.pl_w * scale, a.ui.pl_h * scale);
+            if a.ui.docked {
+                let (x, y) = dock_pos(a);
+                SetWindowPos(a.hpl, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+            } else {
+                SetWindowPos(a.hpl, null_mut(), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+    }
+    a.inv_all();
+}
+
+/// Winamp's shade mode: the main window folds into a 14-pixel strip.
+fn toggle_shade(a: &mut App) {
+    a.ui.shade = !a.ui.shade;
+    unsafe {
+        SetWindowPos(a.hmain, null_mut(), 0, 0, MAIN_W * a.scale, main_h(a) * a.scale, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    apply_region(a);
+    if a.ui.docked && a.ui.pl_open && !a.hpl.is_null() {
+        let (x, y) = dock_pos(a);
+        unsafe { SetWindowPos(a.hpl, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+    }
+    a.inv_main();
+}
+
+fn set_on_top(a: &mut App, on: bool) {
+    a.ui.on_top = on;
+    let after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    unsafe {
+        SetWindowPos(a.hmain, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if !a.hpl.is_null() {
+            SetWindowPos(a.hpl, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+    a.inv_main();
+}
+
+/// The taskbar shows the song, as Winamp's does.
+fn update_title(a: &App) {
+    thread_local!(static LAST: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) });
+    let title = match a.pb.as_ref().and_then(|p| p.track.as_ref()) {
+        Some(t) => format!("{} - SpoTermAmp", t.label()),
+        None => "SpoTermAmp".into(),
+    };
+    LAST.with(|l| {
+        if *l.borrow() != title {
+            unsafe { SetWindowTextW(a.hmain, wide_z(&title).as_ptr()) };
+            *l.borrow_mut() = title;
+        }
+    });
+}
+
+fn logical(lp: LPARAM, scale: i32) -> (i32, i32) {
+    let x = (lp & 0xFFFF) as i16 as i32;
+    let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
+    (x.div_euclid(scale), y.div_euclid(scale))
+}
+
+fn screen_to_logical(h: HWND, lp: LPARAM, scale: i32) -> (i32, i32) {
+    let mut p = POINT { x: (lp & 0xFFFF) as i16 as i32, y: ((lp >> 16) & 0xFFFF) as i16 as i32 };
+    unsafe { ScreenToClient(h, &mut p) };
+    (p.x.div_euclid(scale), p.y.div_euclid(scale))
+}
+
+fn paint(h: HWND, main: bool) {
+    let Some(a) = app() else { return };
+    unsafe {
+        let mut ps: PAINTSTRUCT = std::mem::zeroed();
+        let hdc = BeginPaint(h, &mut ps);
+        let sc = a.scale;
+        let r = RECT { left: ps.rcPaint.left / sc, top: ps.rcPaint.top / sc,
+                       right: (ps.rcPaint.right + sc - 1) / sc, bottom: (ps.rcPaint.bottom + sc - 1) / sc };
+        if main {
+            let mut sf = std::mem::replace(&mut a.main_sf, Surface::empty());
+            draw_main(a, &mut sf);
+            sf.present(hdc, &r, sc);
+            a.main_sf = sf;
+            update_title(a);
+        } else {
+            let mut sf = std::mem::replace(&mut a.pl_sf, Surface::empty());
+            if sf.w != a.ui.pl_w || sf.h != a.ui.pl_h || a.pl_full.replace(false) {
+                sf.resize(a.ui.pl_w, a.ui.pl_h);
+                draw_pl(a, &mut sf);
+            } else {
+                draw_pl_clock(a, &mut sf);
+            }
+            sf.present(hdc, &r, sc);
+            a.pl_sf = sf;
+        }
+        EndPaint(h, &ps);
+    }
+}
+
+// ── Main window ──────────────────────────────────────────────────────────────
+unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let Some(a) = app() else { return DefWindowProcW(h, msg, wp, lp) };
+    if a.hmain.is_null() {
+        return DefWindowProcW(h, msg, wp, lp);
+    }
+    match msg {
+        WM_PAINT => {
+            paint(h, true);
+            return 0;
+        }
+        WM_ERASEBKGND => return 1,
+        WM_ENGINE => {
+            a.on_engine_events();
+            after_events();
+            return 0;
+        }
+        WM_TASK => {
+            a.on_sign_in(wp == 1, lp != 0);
+            a.reschedule();
+            unsafe { SetForegroundWindow(h) };
+            return 0;
+        }
+        WM_TIMER if wp == app::TIMER_ID => {
+            a.on_timer();
+            return 0;
+        }
+        WM_NCHITTEST => {
+            let (x, y) = screen_to_logical(h, lp, a.scale);
+            return if matches!(main_hit(a, x, y), Hit::Drag) { HTCAPTION as LRESULT } else { HTCLIENT as LRESULT };
+        }
+        WM_NCLBUTTONDBLCLK => {
+            // Double-clicking the title bar folds the window, as in Winamp (never maximises).
+            let (_, y) = screen_to_logical(h, lp, a.scale);
+            if y < 14 {
+                toggle_shade(a);
+            }
+            return 0;
+        }
+        WM_ACTIVATE => {
+            a.main_active = (wp & 0xFFFF) as u32 != WA_INACTIVE;
+            a.inv_main();
+        }
+        WM_MOVE => {
+            if a.ui.docked && a.ui.pl_open && !a.hpl.is_null() {
+                let (x, y) = dock_pos(a);
+                SetWindowPos(a.hpl, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+        WM_SIZE => {
+            a.reschedule(); // minimised: no clock ticks or marquee steps
+            if wp as u32 == SIZE_RESTORED {
+                a.inv_all();
+            }
+        }
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+            let (x, y) = logical(lp, a.scale);
+            match main_hit(a, x, y) {
+                Hit::Button(id) => a.hold = Hold::Button(id),
+                Hit::Volume => {
+                    a.hold = Hold::Volume;
+                    a.set_volume(volume_at(x));
+                }
+                Hit::Seek => {
+                    if let Some(d) = a.pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.duration_ms) {
+                        a.hold = Hold::Seek(seek_at(a, x, d));
+                    }
+                }
+                _ => {}
+            }
+            if a.hold != Hold::None {
+                SetCapture(h);
+                a.inv_main();
+            }
+            return 0;
+        }
+        WM_MOUSEMOVE => {
+            let (x, _) = logical(lp, a.scale);
+            match a.hold {
+                Hold::Volume => {
+                    let v = volume_at(x);
+                    if a.volume() != Some(v) {
+                        a.set_volume(v);
+                    }
+                }
+                Hold::Seek(_) => {
+                    if let Some(d) = a.pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.duration_ms) {
+                        a.hold = Hold::Seek(seek_at(a, x, d));
+                        a.inv_all();
+                    }
+                }
+                _ => {}
+            }
+            return 0;
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = logical(lp, a.scale);
+            let hold = std::mem::replace(&mut a.hold, Hold::None);
+            ReleaseCapture();
+            match hold {
+                Hold::Button(id) if matches!(main_hit(a, x, y), Hit::Button(b) if b == id) => main_button(id),
+                Hold::Seek(pos) => a.seek_to(pos),
+                _ => {}
+            }
+            if let Some(a) = app() {
+                a.inv_all();
+                a.reschedule();
+            }
+            return 0;
+        }
+        WM_CAPTURECHANGED => {
+            if matches!(a.hold, Hold::Button(_) | Hold::Volume | Hold::Seek(_)) {
+                a.hold = Hold::None;
+                a.inv_main();
+            }
+        }
+        WM_RBUTTONUP | WM_NCRBUTTONUP => {
+            main_menu();
+            return 0;
+        }
+        WM_CONTEXTMENU => return 0,
+        WM_MOUSEWHEEL => {
+            let delta = ((wp >> 16) & 0xFFFF) as i16 as i32;
+            a.change_volume(if delta > 0 { 2 } else { -2 });
+            a.reschedule();
+            return 0;
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            if key(wp as u16, false, msg == WM_SYSKEYDOWN) {
+                return 0;
+            }
+        }
+        WM_CHAR => {
+            char_in(wp as u32);
+            return 0;
+        }
+        WM_CLOSE => {
+            a.save();
+            DestroyWindow(h);
+            return 0;
+        }
+        WM_DESTROY => {
+            PostQuitMessage(0);
+            return 0;
+        }
+        _ => {}
+    }
+    DefWindowProcW(h, msg, wp, lp)
+}
+
+/// Work that needs a menu or a message box, after the state has settled.
+fn after_events() {
+    let Some(a) = app() else { return };
+    update_title(a);
+    if a.devices_wanted && !a.devices.is_empty() {
+        a.devices_wanted = false;
+        devices_menu();
+    }
+}
+
+fn main_button(id: u32) {
+    let Some(a) = app() else { return };
+    match id {
+        B_PREV => a.skip(false),
+        B_PLAY => a.play(),
+        B_PAUSE => a.toggle_play(),
+        B_STOP => a.stop(),
+        B_NEXT => a.skip(true),
+        B_EJECT => library_menu(),
+        B_SHUFFLE => a.toggle_shuffle(),
+        B_REPEAT => a.cycle_repeat(),
+        B_EQ => a.flash("No equalizer: Spotify's player has none", false),
+        B_PL => toggle_playlist(a),
+        B_OPTIONS | B_CL_O => main_menu(),
+        B_MIN => unsafe {
+            ShowWindow(a.hmain, SW_MINIMIZE);
+        },
+        B_SHADE => toggle_shade(a),
+        B_CLOSE => unsafe {
+            PostMessageW(a.hmain, WM_CLOSE, 0, 0);
+        },
+        B_CL_A => set_on_top(a, !a.ui.on_top),
+        B_CL_I => song_info(),
+        B_CL_D => set_scale(a, if a.scale == 1 { 2 } else { 1 }),
+        B_CL_V => a.flash("No visualizer: the engine doesn't share audio", false),
+        B_TIME => {
+            a.ui.remaining = !a.ui.remaining;
+            a.inv_all();
+        }
+        B_LOGO => about(),
+        _ => {}
+    }
+}
+
+// ── Playlist window ──────────────────────────────────────────────────────────
+unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let Some(a) = app() else { return DefWindowProcW(h, msg, wp, lp) };
+    if a.hpl.is_null() {
+        return DefWindowProcW(h, msg, wp, lp);
+    }
+    let sc = a.scale;
+    match msg {
+        WM_PAINT => {
+            paint(h, false);
+            return 0;
+        }
+        WM_ERASEBKGND => return 1,
+        WM_NCHITTEST => {
+            let (x, y) = screen_to_logical(h, lp, sc);
+            return match pl_hit(a, x, y) {
+                Hit::Drag => HTCAPTION as LRESULT,
+                Hit::Resize => HTBOTTOMRIGHT as LRESULT,
+                _ => HTCLIENT as LRESULT,
+            };
+        }
+        WM_NCLBUTTONDBLCLK => return 0,
+        WM_ACTIVATE => {
+            a.pl_active = (wp & 0xFFFF) as u32 != WA_INACTIVE;
+            a.inv_pl();
+        }
+        WM_GETMINMAXINFO => {
+            let mm = &mut *(lp as *mut MINMAXINFO);
+            mm.ptMinTrackSize = POINT { x: 275 * sc, y: 116 * sc };
+            return 0;
+        }
+        WM_SIZING => {
+            // Playlists grow in steps of 25x29, the size of the skin's tiles.
+            let r = &mut *(lp as *mut RECT);
+            let w = ((r.right - r.left) / sc - 275 + 12).div_euclid(25).max(0) * 25 + 275;
+            let hgt = ((r.bottom - r.top) / sc - 116 + 14).div_euclid(29).max(0) * 29 + 116;
+            r.right = r.left + w * sc;
+            r.bottom = r.top + hgt * sc;
+            return 1;
+        }
+        WM_SIZE => {
+            let (w, hgt) = ((lp & 0xFFFF) as i32, ((lp >> 16) & 0xFFFF) as i32);
+            if w > 0 && hgt > 0 {
+                a.ui.pl_w = (w / sc).max(275);
+                a.ui.pl_h = (hgt / sc).max(116);
+                a.scroll(0);
+                a.prefetch();
+                a.reschedule();
+                a.inv_pl();
+            }
+        }
+        WM_MOVING => {
+            // Snap to the bottom of the main window within 10 pixels, and dock there.
+            let r = &mut *(lp as *mut RECT);
+            let (dx, dy) = dock_pos(a);
+            let snap = 10 * sc;
+            if (r.left - dx).abs() < snap && (r.top - dy).abs() < snap {
+                let (w, hgt) = (r.right - r.left, r.bottom - r.top);
+                *r = RECT { left: dx, top: dy, right: dx + w, bottom: dy + hgt };
+            }
+            return 1;
+        }
+        WM_EXITSIZEMOVE => {
+            let r = window_rect(h);
+            let (dx, dy) = dock_pos(a);
+            a.ui.docked = r.left == dx && r.top == dy;
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = logical(lp, sc);
+            match pl_hit(a, x, y) {
+                Hit::Button(id) => {
+                    a.hold = Hold::PlButton(id);
+                    SetCapture(h);
+                }
+                Hit::Row(i) => {
+                    let l = a.cur_list_mut();
+                    if i < l.tracks.len() {
+                        l.sel = i;
+                    }
+                    a.prefetch();
+                }
+                Hit::Scroll => {
+                    let (hy, travel) = scroll_geometry(a);
+                    if y >= hy && y < hy + 18 {
+                        a.hold = Hold::PlScroll(y - hy);
+                        SetCapture(h);
+                    } else if travel > 0 {
+                        let rows = pl_rows(a) as i64;
+                        a.scroll(if y < hy { -rows } else { rows });
+                    }
+                }
+                _ => {}
+            }
+            a.inv_pl();
+            a.reschedule();
+            return 0;
+        }
+        WM_LBUTTONDBLCLK => {
+            let (x, y) = logical(lp, sc);
+            match pl_hit(a, x, y) {
+                Hit::Row(i) if i < a.cur_list().tracks.len() => {
+                    a.cur_list_mut().sel = i;
+                    a.play_selected();
+                }
+                Hit::Row(_) if a.cur_list().locked => a.play_selected(),
+                Hit::Button(_) => return pl_proc(h, WM_LBUTTONDOWN, wp, lp),
+                _ => {}
+            }
+            a.reschedule();
+            return 0;
+        }
+        WM_MOUSEMOVE => {
+            if let Hold::PlScroll(grab) = a.hold {
+                let (_, y) = logical(lp, sc);
+                let (_, travel) = scroll_geometry(a);
+                let rows = pl_rows(a);
+                let l = a.cur_list_mut();
+                let max_top = l.tracks.len().saturating_sub(rows);
+                if travel > 0 {
+                    l.top = ((y - grab - 20).clamp(0, travel) as i64 * max_top as i64 / travel as i64) as usize;
+                }
+                a.prefetch();
+                a.inv_pl();
+                a.reschedule();
+            }
+            return 0;
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = logical(lp, sc);
+            let hold = std::mem::replace(&mut a.hold, Hold::None);
+            ReleaseCapture();
+            if let Hold::PlButton(id) = hold {
+                if matches!(pl_hit(a, x, y), Hit::Button(b) if b == id) {
+                    pl_button(id);
+                }
+            }
+            if let Some(a) = app() {
+                a.inv_all();
+                a.reschedule();
+            }
+            return 0;
+        }
+        WM_CAPTURECHANGED => {
+            if matches!(a.hold, Hold::PlButton(_) | Hold::PlScroll(_)) {
+                a.hold = Hold::None;
+                a.inv_pl();
+            }
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wp >> 16) & 0xFFFF) as i16 as i64;
+            a.scroll(-delta / 40);
+            a.reschedule();
+            return 0;
+        }
+        WM_RBUTTONUP | WM_NCRBUTTONUP => {
+            library_menu();
+            return 0;
+        }
+        WM_CONTEXTMENU => return 0,
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            if key(wp as u16, true, msg == WM_SYSKEYDOWN) {
+                return 0;
+            }
+        }
+        WM_CHAR => {
+            char_in(wp as u32);
+            return 0;
+        }
+        WM_CLOSE => {
+            toggle_playlist(a);
+            return 0;
+        }
+        _ => {}
+    }
+    DefWindowProcW(h, msg, wp, lp)
+}
+
+fn pl_button(id: u32) {
+    let Some(a) = app() else { return };
+    match id {
+        P_CLOSE => toggle_playlist(a),
+        P_SHADE => a.flash("Shade mode isn't in this version yet", false),
+        P_ADD | P_LIST | P_EJECT => library_menu(),
+        P_REM | P_SEL => {}
+        P_MISC => {
+            a.reload();
+        }
+        P_PREV => a.skip(false),
+        P_PLAY => a.play(),
+        P_PAUSE => a.toggle_play(),
+        P_STOP => a.stop(),
+        P_NEXT => a.skip(true),
+        _ => {}
+    }
+}
+
+// ── Keyboard ─────────────────────────────────────────────────────────────────
+fn down(vk: VIRTUAL_KEY) -> bool {
+    unsafe { GetKeyState(vk as i32) < 0 }
+}
+
+/// A key press in either window. Winamp's own keys (z x c v b, arrows) plus SpoTerm's.
+fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
+    let Some(a) = app() else { return false };
+    let ctrl = down(VK_CONTROL);
+    if a.typing {
+        match vk {
+            VK_RETURN => a.submit_search(),
+            VK_ESCAPE => {
+                a.typing = false;
+                a.inv_pl();
+            }
+            VK_BACK => {
+                a.query.pop();
+                a.inv_pl();
+            }
+            _ if ctrl && vk == b'U' as u16 => {
+                a.query.clear();
+                a.inv_pl();
+            }
+            _ if ctrl && vk == b'V' as u16 => {
+                if let Some(t) = clipboard_text() {
+                    a.query.push_str(&spotify::clean(&t));
+                    a.query.truncate(200);
+                    a.inv_pl();
+                }
+            }
+            _ => return false, // letters arrive as WM_CHAR
+        }
+        a.reschedule();
+        return true;
+    }
+    if alt {
+        if vk == b'E' as u16 {
+            toggle_playlist(a);
+            return true;
+        }
+        return false;
+    }
+    let rows = pl_rows(a) as i64;
+    match vk {
+        _ if ctrl && vk == b'D' as u16 => set_scale(a, if a.scale == 1 { 2 } else { 1 }),
+        _ if ctrl && vk == b'T' as u16 => set_on_top(a, !a.ui.on_top),
+        _ if ctrl && vk == b'W' as u16 => toggle_shade(a),
+        _ if ctrl && vk == b'F' as u16 => a.start_search(),
+        _ if ctrl => return false,
+        0x5A => a.skip(false),           // Z
+        0x58 => a.play(),                // X
+        0x43 | VK_SPACE => a.toggle_play(), // C (Winamp's pause), space
+        0x56 => a.stop(),                // V
+        0x42 => a.skip(true),            // B
+        0x53 => a.toggle_shuffle(),      // S
+        0x52 => a.cycle_repeat(),        // R
+        0x46 => a.toggle_like(),         // F
+        0x44 => a.fetch_devices(),       // D
+        0x4C => library_menu(),          // L
+        0x4A => a.start_search(),        // J (Winamp's jump to file)
+        VK_F5 => a.reload(),
+        VK_LEFT => a.seek_by(-app::SEEK_STEP_MS),
+        VK_RIGHT => a.seek_by(app::SEEK_STEP_MS),
+        VK_UP if !in_pl => a.change_volume(app::VOLUME_STEP),
+        VK_DOWN if !in_pl => a.change_volume(-app::VOLUME_STEP),
+        VK_UP => a.move_sel(-1),
+        VK_DOWN => a.move_sel(1),
+        VK_PRIOR => a.move_sel(-rows),
+        VK_NEXT => a.move_sel(rows),
+        VK_HOME => a.move_sel(-1_000_000),
+        VK_END => a.move_sel(1_000_000),
+        VK_RETURN => a.play_selected(),
+        VK_ADD | VK_OEM_PLUS => a.change_volume(app::VOLUME_STEP),
+        VK_SUBTRACT | VK_OEM_MINUS => a.change_volume(-app::VOLUME_STEP),
+        _ => return false,
+    }
+    if let Some(a) = app() {
+        a.reschedule();
+    }
+    true
+}
+
+fn char_in(c: u32) {
+    let Some(a) = app() else { return };
+    let Some(ch) = char::from_u32(c) else { return };
+    if std::mem::take(&mut a.eat_char) && a.typing && ch.eq_ignore_ascii_case(&'j') {
+        return;
+    }
+    if a.typing {
+        if !ch.is_control() && a.query.chars().count() < 200 {
+            a.query.push(ch);
+            a.inv_pl();
+        }
+        return;
+    }
+    if ch == '/' {
+        a.start_search();
+        a.eat_char = false; // this character opened it; nothing else follows
+    }
+}
+
+fn clipboard_text() -> Option<String> {
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe {
+        if OpenClipboard(null_mut()) == 0 {
+            return None;
+        }
+        let h = GetClipboardData(CF_UNICODETEXT);
+        let mut out = None;
+        if !h.is_null() {
+            let p = GlobalLock(h) as *const u16;
+            if !p.is_null() {
+                let mut n = 0;
+                while n < 4096 && *p.add(n) != 0 {
+                    n += 1;
+                }
+                out = Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, n)).replace(['\r', '\n'], " "));
+                GlobalUnlock(h);
+            }
+        }
+        CloseClipboard();
+        out
+    }
+}
+
+// ── Menus ────────────────────────────────────────────────────────────────────
+fn add(m: HMENU, id: usize, text: &str, checked: bool, enabled: bool) {
+    let flags = MF_STRING | if checked { MF_CHECKED } else { 0 } | if enabled { 0 } else { MF_GRAYED };
+    unsafe { AppendMenuW(m, flags, id, wide_z(text).as_ptr()) };
+}
+
+fn sep(m: HMENU) {
+    unsafe { AppendMenuW(m, MF_SEPARATOR, 0, null()) };
+}
+
+fn library_items(a: &App, m: HMENU) {
+    add(m, M_LIKED, "&Liked Songs", a.cur == "liked", true);
+    add(m, M_SEARCH, "&Search...\tJ, /", a.cur == "search", true);
+    sep(m);
+    if a.playlists.is_empty() {
+        add(m, 0, if a.playlists_loaded { "No playlists" } else { "Loading playlists..." }, false, false);
+    }
+    for (i, p) in a.playlists.iter().enumerate().take(900) {
+        let name = p.name.replace('&', "&&");
+        add(m, M_PLAYLIST + i, &name, a.cur == format!("pl:{}", p.id), true);
+    }
+    sep(m);
+    add(m, M_RELOAD, "&Reload\tF5", false, true);
+}
+
+/// Show a popup menu at the cursor and return the chosen command (0: none). No app
+/// reference is held while it is open: the menu's modal loop keeps dispatching messages.
+fn popup(build: impl FnOnce(&App, HMENU)) -> usize {
+    let Some(a) = app() else { return 0 };
+    let owner = a.hmain;
+    unsafe {
+        let m = CreatePopupMenu();
+        build(a, m);
+        let mut pt = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut pt);
+        SetForegroundWindow(owner);
+        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, owner, null());
+        DestroyMenu(m);
+        cmd as usize
+    }
+}
+
+fn library_menu() {
+    let cmd = popup(library_items);
+    run_command(cmd);
+}
+
+fn main_menu() {
+    let cmd = popup(|a, m| unsafe {
+        let lib = CreatePopupMenu();
+        library_items(a, lib);
+        AppendMenuW(m, MF_POPUP | MF_STRING, lib as usize, wide_z("&Library").as_ptr());
+        add(m, M_DEVICES, "Play on &device...\tD", false, a.engine.alive);
+        sep(m);
+        let has_track = a.pb.as_ref().is_some_and(|p| p.track.is_some());
+        add(m, M_PLAY, "&Play\tX", false, true);
+        add(m, M_PAUSE, "P&ause\tC", false, has_track);
+        add(m, M_STOP, "S&top\tV", false, has_track);
+        add(m, M_PREV, "Pre&vious\tZ", false, has_track);
+        add(m, M_NEXT, "&Next\tB", false, has_track);
+        sep(m);
+        let liked = a.liked == Some(true) && a.pb.as_ref().and_then(|p| p.track.as_ref()).is_some_and(|t| a.liked_uri.as_deref() == Some(&t.uri));
+        add(m, M_LIKE, "&Like this song\tF", liked, has_track);
+        let (shuffle, repeat) = a.pb.as_ref().map_or((false, Repeat::Off), |p| (p.shuffle, p.repeat));
+        add(m, M_SHUFFLE, "S&huffle\tS", shuffle, a.pb.is_some());
+        let rep = CreatePopupMenu();
+        for (i, (r, label)) in [(Repeat::Off, "Off"), (Repeat::Context, "All"), (Repeat::Track, "One")].into_iter().enumerate() {
+            add(rep, M_REPEAT + i, label, repeat == r, a.pb.is_some());
+        }
+        AppendMenuW(m, MF_POPUP | MF_STRING, rep as usize, wide_z("&Repeat\tR").as_ptr());
+        sep(m);
+        add(m, M_PLWIN, "Playlist &editor\tAlt+E", a.ui.pl_open, true);
+        add(m, M_DOUBLE, "Dou&ble size\tCtrl+D", a.scale > 1, true);
+        add(m, M_ONTOP, "Always on &top\tCtrl+T", a.ui.on_top, true);
+        add(m, M_SHADE, "&Shade mode\tCtrl+W", a.ui.shade, true);
+        add(m, M_SCROLL, "Scroll song t&itle", a.ui.scroll, true);
+        add(m, M_REMAINING, "Show time re&maining", a.ui.remaining, true);
+        sep(m);
+        add(m, M_RETRY, "Retry the pla&yer", false, a.phase == Phase::Running);
+        add(m, M_SIGNIN, "Sign &in to Spotify again", false, true);
+        add(m, M_SIGNIN_PLAYER, "Sign in the player a&gain", false, a.s.engine);
+        add(m, M_FOLDER, "Open settings &folder", false, true);
+        add(m, M_ABOUT, "About Spo&TermAmp", false, true);
+        sep(m);
+        add(m, M_EXIT, "E&xit", false, true);
+    });
+    run_command(cmd);
+}
+
+fn devices_menu() {
+    let cmd = popup(|a, m| {
+        let eng = a.engine.device_id.clone();
+        for (i, d) in a.devices.iter().enumerate().take(50) {
+            let me = if Some(&d.id) == eng.as_ref() { " (this PC)" } else { "" };
+            let label = format!("{}{me}\t{}", d.name.replace('&', "&&"), d.kind.to_lowercase());
+            add(m, M_DEVICE + i, &label, d.active, true);
+        }
+    });
+    run_command(cmd);
+}
+
+fn run_command(cmd: usize) {
+    let Some(a) = app() else { return };
+    match cmd {
+        0 => {}
+        M_LIKED => a.open_list("liked"),
+        M_SEARCH => a.start_search(),
+        M_RELOAD => a.reload(),
+        M_DEVICES => a.fetch_devices(),
+        M_LIKE => a.toggle_like(),
+        M_SHUFFLE => a.toggle_shuffle(),
+        M_PLAY => a.play(),
+        M_PAUSE => a.toggle_play(),
+        M_STOP => a.stop(),
+        M_NEXT => a.skip(true),
+        M_PREV => a.skip(false),
+        M_PLWIN => toggle_playlist(a),
+        M_DOUBLE => set_scale(a, if a.scale == 1 { 2 } else { 1 }),
+        M_ONTOP => set_on_top(a, !a.ui.on_top),
+        M_SHADE => toggle_shade(a),
+        M_SCROLL => {
+            a.ui.scroll = !a.ui.scroll;
+            a.marquee_px = 0;
+            a.inv_main();
+        }
+        M_REMAINING => {
+            a.ui.remaining = !a.ui.remaining;
+            a.inv_all();
+        }
+        M_RETRY => a.reload(),
+        M_SIGNIN => a.sign_in_again(),
+        M_SIGNIN_PLAYER => {
+            a.engine.stop();
+            let _ = std::fs::remove_file(Engine::cache_dir().join("credentials.json"));
+            a.phase = Phase::PlayerSignIn;
+            a.flash("Sign in SpoTerm's player in your browser", false);
+            a.engine.sign_in(&a.s, true, a.hmain as isize);
+        }
+        M_FOLDER => unsafe {
+            let dir = config::config_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            ShellExecuteW(null_mut(), wide_z("open").as_ptr(), wide_z(&dir.to_string_lossy()).as_ptr(), null(), null(), SW_SHOWNORMAL);
+        },
+        M_ABOUT => about(),
+        M_EXIT => unsafe {
+            PostMessageW(a.hmain, WM_CLOSE, 0, 0);
+        },
+        c if (M_REPEAT..M_REPEAT + 3).contains(&c) => a.set_repeat([Repeat::Off, Repeat::Context, Repeat::Track][c - M_REPEAT]),
+        c if (M_PLAYLIST..M_PLAYLIST + 900).contains(&c) => a.open_playlist(c - M_PLAYLIST),
+        c if (M_DEVICE..M_DEVICE + 50).contains(&c) => a.transfer(c - M_DEVICE),
+        _ => {}
+    }
+    if let Some(a) = app() {
+        a.reschedule();
+    }
+}
+
+fn about() {
+    let owner = app().map_or(null_mut(), |a| a.hmain);
+    let text = format!(
+        "SpoTermAmp {}\n\nA classic-skinned window for SpoTerm's Spotify engine.\n\
+         Skin: Winamp5 Classified v5.5 by Sven Kistner, Zarko Jovic, GuidoD and Wildrose-Wally.\n\n\
+         Keys: Z X C V B (prev, play, pause, stop, next), arrows seek and change volume,\n\
+         S shuffle, R repeat, F like, D devices, L library, J or / search, Ctrl+D double size,\n\
+         Ctrl+T always on top, Alt+E playlist, F5 reload.",
+        env!("CARGO_PKG_VERSION"));
+    unsafe { MessageBoxW(owner, wide_z(&text).as_ptr(), wide_z("About SpoTermAmp").as_ptr(), MB_OK | MB_ICONINFORMATION) };
+}
+
+fn song_info() {
+    let Some(a) = app() else { return };
+    let owner = a.hmain;
+    let text = match a.pb.as_ref().and_then(|p| p.track.as_ref()) {
+        Some(t) => {
+            let dev = a.pb.as_ref().map_or(String::new(), |p| p.device_name.clone());
+            format!("{}\n{}\n{}\n\n{}  ·  playing on {}", t.name, t.artists, t.album, spotify::fmt_time(t.duration_ms), dev)
+        }
+        None => "Nothing is playing.".into(),
+    };
+    unsafe { MessageBoxW(owner, wide_z(&text).as_ptr(), wide_z("Song info").as_ptr(), MB_OK) };
+}
+
+// ── First run: the Client ID ─────────────────────────────────────────────────
+/// A small window asking for the Spotify app's Client ID. None if cancelled.
+fn ask_client_id() -> Option<String> {
+    const ID_EDIT: isize = 10;
+    const ID_LINK: isize = 11;
+    static mut RESULT: Option<String> = None;
+    static mut DONE: bool = false;
+
+    unsafe extern "system" fn proc_(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match msg {
+            WM_COMMAND => {
+                let id = (wp & 0xFFFF) as i32;
+                if id == IDOK {
+                    let edit = GetDlgItem(h, ID_EDIT as i32);
+                    let mut buf = [0u16; 64];
+                    let n = GetWindowTextW(edit, buf.as_mut_ptr(), 64);
+                    let cid = String::from_utf16_lossy(&buf[..n.max(0) as usize]).trim().to_string();
+                    if config::valid_client_id(&cid) {
+                        RESULT = Some(cid);
+                        DestroyWindow(h);
+                    } else {
+                        MessageBoxW(h, wide_z("That doesn't look like a Client ID (32 letters and digits).").as_ptr(),
+                                    wide_z("SpoTermAmp").as_ptr(), MB_OK | MB_ICONWARNING);
+                        SetFocus(edit);
+                    }
+                    return 0;
+                }
+                if id == IDCANCEL {
+                    DestroyWindow(h);
+                    return 0;
+                }
+                if id == ID_LINK as i32 {
+                    ShellExecuteW(null_mut(), wide_z("open").as_ptr(), wide_z(DASHBOARD).as_ptr(), null(), null(), SW_SHOWNORMAL);
+                    return 0;
+                }
+            }
+            WM_CLOSE => {
+                DestroyWindow(h);
+                return 0;
+            }
+            WM_DESTROY => {
+                DONE = true;
+                return 0;
+            }
+            _ => {}
+        }
+        DefWindowProcW(h, msg, wp, lp)
+    }
+
+    unsafe {
+        let hinst = GetModuleHandleW(null());
+        let cls = wide_z("SpoTermAmpSetup");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(proc_),
+            hInstance: hinst,
+            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+            hbrBackground: (COLOR_BTNFACE + 1) as usize as HBRUSH,
+            lpszClassName: cls.as_ptr(),
+            ..std::mem::zeroed()
+        };
+        RegisterClassExW(&wc);
+        let dpi = GetDpiForSystem() as i32;
+        let px = |v: i32| v * dpi / 96;
+        let (w, h) = (px(460), px(250));
+        let x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
+        let y = (GetSystemMetrics(SM_CYSCREEN) - h) / 3;
+        let win = CreateWindowExW(WS_EX_DLGMODALFRAME, cls.as_ptr(), wide_z("SpoTermAmp setup").as_ptr(),
+                                  WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, null_mut(), null_mut(), hinst, null());
+        if win.is_null() {
+            return None;
+        }
+        let font = gfx::make_font("Segoe UI", px(15), false);
+        let child = |class: &str, text: &str, style: u32, x: i32, y: i32, w: i32, h: i32, id: isize| {
+            let c = CreateWindowExW(if class == "EDIT" { WS_EX_CLIENTEDGE } else { 0 }, wide_z(class).as_ptr(), wide_z(text).as_ptr(),
+                                    WS_CHILD | WS_VISIBLE | style, px(x), px(y), px(w), px(h), win, id as HMENU, hinst, null());
+            SendMessageW(c, WM_SETFONT, font as usize, 1);
+            c
+        };
+        child("STATIC", "SpoTermAmp needs the Client ID of your own Spotify app (one-time setup):\n\n\
+                         1. Create an app at developer.spotify.com/dashboard.\n\
+                         2. Add the redirect URI  http://127.0.0.1:8888/callback  and tick Web API.\n\
+                         3. Paste the app's Client ID here (no secret needed).",
+              0, 14, 10, 430, 110, 0);
+        let edit = child("EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL as u32, 14, 128, 430, 26, ID_EDIT);
+        child("BUTTON", "Open dashboard", WS_TABSTOP, 14, 172, 130, 30, ID_LINK);
+        child("BUTTON", "OK", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 254, 172, 90, 30, IDOK as isize);
+        child("BUTTON", "Cancel", WS_TABSTOP, 354, 172, 90, 30, IDCANCEL as isize);
+        ShowWindow(win, SW_SHOW);
+        SetForegroundWindow(win);
+        SetFocus(edit);
+        let mut msg: MSG = std::mem::zeroed();
+        while !DONE && GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            if IsDialogMessageW(win, &msg) == 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        DeleteObject(font);
+        (*std::ptr::addr_of_mut!(RESULT)).take()
+    }
+}
+
+// ── Self-check ───────────────────────────────────────────────────────────────
+/// `--snapshot DIR`: draw both windows with sample data into DIR/main.bmp and DIR/pl.bmp,
+/// without opening any window. Used to check the drawing against the skin.
+fn snapshot(dir: &str) -> i32 {
+    use std::rc::Rc;
+    let sk = match skin::Skin::load(skin::DEFAULT) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("skin: {e}");
+            return 1;
+        }
+    };
+    let pl_font = gfx::make_font(&sk.pl.font, 10, false);
+    let small_font = gfx::make_font(&sk.pl.font, 9, false);
+    let s = config::load();
+    let ui = config::UiState { pl_w: 275, pl_h: 232, ..Default::default() };
+    let mut a = App::new(s, ui, sk, Engine::new(Default::default()), pl_font, small_font, 1);
+    a.local = true;
+    let tracks: Vec<Rc<spotify::Track>> = (0..30)
+        .map(|i| Rc::new(spotify::Track {
+            uri: format!("spotify:track:{i}"),
+            name: if i == 3 { "Lyin' Eyes".into() } else { format!("Song {i}") },
+            artists: if i == 3 { "Eagles".into() } else { "Artist".into() },
+            album: "Album".into(),
+            duration_ms: 180_000 + i * 1000,
+            pos: i,
+            playable: i != 6,
+        }))
+        .collect();
+    {
+        let l = a.lists.get_mut("liked").expect("liked");
+        l.tracks = tracks.clone();
+        l.total = 30;
+        l.sel = 5;
+        l.next_offset = None;
+    }
+    a.pb = Some(spotify::Playback {
+        track: Some(tracks[3].clone()),
+        playing: true,
+        progress_ms: 61_000,
+        at: Instant::now(),
+        device_id: Some("x".into()),
+        device_name: "SpoTerm".into(),
+        volume: Some(70),
+        shuffle: true,
+        repeat: Repeat::Off,
+        context_uri: None,
+    });
+    let mut main_sf = Surface::new(MAIN_W, MAIN_H);
+    draw_main(&mut a, &mut main_sf);
+    let mut pl_sf = Surface::new(275, 232);
+    draw_pl(&mut a, &mut pl_sf);
+    a.ui.shade = true;
+    let mut shade_sf = Surface::new(MAIN_W, SHADE_H);
+    draw_main(&mut a, &mut shade_sf);
+    let ok = write_bmp(&format!("{dir}/main.bmp"), MAIN_W, MAIN_H, &main_sf.pixels())
+        && write_bmp(&format!("{dir}/pl.bmp"), 275, 232, &pl_sf.pixels())
+        && write_bmp(&format!("{dir}/shade.bmp"), MAIN_W, SHADE_H, &shade_sf.pixels());
+    std::mem::forget(a); // no engine, no windows: nothing to clean up
+    if ok { 0 } else { 1 }
+}
+
+fn write_bmp(path: &str, w: i32, h: i32, px: &[u32]) -> bool {
+    let mut d = Vec::with_capacity(54 + px.len() * 4);
+    let size = 54 + px.len() as u32 * 4;
+    d.extend_from_slice(b"BM");
+    d.extend_from_slice(&size.to_le_bytes());
+    d.extend_from_slice(&[0; 4]);
+    d.extend_from_slice(&54u32.to_le_bytes());
+    d.extend_from_slice(&40u32.to_le_bytes());
+    d.extend_from_slice(&w.to_le_bytes());
+    d.extend_from_slice(&(-h).to_le_bytes());
+    d.extend_from_slice(&1u16.to_le_bytes());
+    d.extend_from_slice(&32u16.to_le_bytes());
+    d.extend_from_slice(&[0; 24]);
+    for p in px {
+        d.extend_from_slice(&p.to_le_bytes());
+    }
+    std::fs::write(path, d).is_ok()
+}
