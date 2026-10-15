@@ -131,6 +131,16 @@ pub fn clean(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// The maximum number of characters allowed in a search query.
+pub const MAX_QUERY_CHARS: usize = 200;
+
+/// Append `extra` to `dst`, keeping `dst` at no more than `max_chars` characters.
+/// Counts chars (not bytes), so it can never split a UTF-8 sequence.
+pub fn append_capped(dst: &mut String, extra: &str, max_chars: usize) {
+    let room = max_chars.saturating_sub(dst.chars().count());
+    dst.extend(extra.chars().take(room));
+}
+
 pub fn track(item: &Value, pos: u32, is_local: bool) -> Option<Track> {
     let uri = item.get("uri")?.as_str()?;
     // With a market, Spotify swaps in a regional copy of some tracks (relinking). Keep the
@@ -288,5 +298,240 @@ mod tests {
         let e = ApiError::from_event(&json!({"status": 404, "error": "Player command failed: No active device found"})).unwrap();
         assert!(e.no_device());
         assert!(ApiError::from_event(&json!({"status": 204, "body": null})).is_none());
+    }
+
+    // ── Step 0: prove the old logic panics ──────────────────────────────────
+    /// Regression guard: the old `push_str` + `truncate(200)` panicked when byte
+    /// 200 fell inside a multibyte character. This test reproduces that crash.
+    #[test]
+    #[should_panic(expected = "not on a char boundary")]
+    fn old_truncate_panics_on_multibyte() {
+        // 199 ASCII bytes + "😀" (4 bytes) → 203 bytes; byte index 200 is inside
+        // the emoji, so `truncate(200)` must panic.
+        let mut s = "a".repeat(199);
+        s.push_str("😀");
+        s.truncate(200);
+    }
+
+    // ── append_capped tests ─────────────────────────────────────────────────
+    fn assert_valid(s: &str, max: usize) {
+        assert!(s.chars().count() <= max, "char count {} exceeds {max}", s.chars().count());
+        assert!(s.is_char_boundary(s.len()));
+        assert_eq!(s, String::from_utf8(s.as_bytes().to_vec()).unwrap());
+    }
+
+    #[test]
+    fn empty_paste() {
+        let mut s = String::new();
+        append_capped(&mut s, "", MAX_QUERY_CHARS);
+        assert_eq!(s, "");
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn short_ascii() {
+        let mut s = String::new();
+        append_capped(&mut s, "abc", MAX_QUERY_CHARS);
+        assert_eq!(s, "abc");
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn appends_to_existing() {
+        let mut s = "ab".to_string();
+        append_capped(&mut s, "cd", MAX_QUERY_CHARS);
+        assert_eq!(s, "abcd");
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn exactly_at_cap() {
+        let mut s = String::new();
+        let extra: String = "x".repeat(200);
+        append_capped(&mut s, &extra, MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        assert_eq!(s, extra);
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn one_over_cap() {
+        let mut s = String::new();
+        let extra: String = "x".repeat(201);
+        append_capped(&mut s, &extra, MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        assert_eq!(s, "x".repeat(200));
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn far_over_cap() {
+        let mut s = String::new();
+        let extra: String = "x".repeat(5000);
+        append_capped(&mut s, &extra, MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        assert_eq!(s, "x".repeat(200));
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn two_byte_chars() {
+        let mut s = String::new();
+        let extra: String = "é".repeat(300);
+        append_capped(&mut s, &extra, MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        assert_eq!(s.len(), 400); // 2 bytes each
+        assert_eq!(s, "é".repeat(200));
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn three_byte_chars_euro() {
+        let mut s = String::new();
+        let extra: String = "€".repeat(300);
+        append_capped(&mut s, &extra, MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        assert_eq!(s.len(), 600); // 3 bytes each
+        assert_eq!(s, "€".repeat(200));
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn three_byte_chars_cjk() {
+        let mut s = String::new();
+        let extra: String = "日".repeat(300);
+        append_capped(&mut s, &extra, MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        assert_eq!(s.len(), 600); // 3 bytes each
+        assert_eq!(s, "日".repeat(200));
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn four_byte_chars() {
+        let mut s = String::new();
+        let extra: String = "😀".repeat(300);
+        append_capped(&mut s, &extra, MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        assert_eq!(s.len(), 800); // 4 bytes each
+        assert_eq!(s, "😀".repeat(200));
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn cap_lands_inside_multibyte_by_bytes() {
+        // 199 ASCII + "😀😀" → by bytes that's 199 + 8 = 207, but by chars it's 201.
+        // The function should keep exactly 200 chars: 199 + 1 emoji.
+        let mut s = "a".repeat(199);
+        append_capped(&mut s, "😀😀", MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        let expected = format!("{}{}", "a".repeat(199), "😀");
+        assert_eq!(s, expected);
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn mixed_widths() {
+        let unit = "aé€😀"; // 4 chars, 10 bytes
+        let extra: String = unit.repeat(250); // 1000 chars
+        let mut s = String::new();
+        append_capped(&mut s, &extra, MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        let expected: String = extra.chars().take(200).collect();
+        assert_eq!(s, expected);
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn existing_query_at_cap() {
+        let mut s = "z".repeat(200);
+        append_capped(&mut s, "x", MAX_QUERY_CHARS);
+        assert_eq!(s, "z".repeat(200));
+        assert_eq!(s.chars().count(), 200);
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn existing_query_multibyte_partially_full() {
+        let mut s: String = "é".repeat(150);
+        let extra: String = "😀".repeat(100);
+        append_capped(&mut s, &extra, MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        let expected = format!("{}{}", "é".repeat(150), "😀".repeat(50));
+        assert_eq!(s, expected);
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn over_cap_existing_query_defensive() {
+        // dst already has 250 chars (shouldn't happen, but must not panic).
+        let mut s = "a".repeat(250);
+        append_capped(&mut s, "x", MAX_QUERY_CHARS);
+        assert_eq!(s, "a".repeat(250)); // unchanged, no panic
+        assert_valid(&s, 250); // still valid UTF-8 (just over the intended cap)
+    }
+
+    #[test]
+    fn max_chars_zero() {
+        let mut s = String::new();
+        append_capped(&mut s, "hello", 0);
+        assert_eq!(s, "");
+        assert_valid(&s, 0);
+
+        let mut s2 = "existing".to_string();
+        append_capped(&mut s2, "more", 0);
+        assert_eq!(s2, "existing"); // unchanged
+    }
+
+    #[test]
+    fn combined_with_clean() {
+        let mut s = String::new();
+        let raw = "a\u{1b}[2Jb\n\tc";
+        append_capped(&mut s, &clean(raw), MAX_QUERY_CHARS);
+        assert_eq!(s, "a[2Jbc");
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn combining_marks() {
+        // "e\u{301}" is two chars (e + combining acute), not one grapheme cluster.
+        // The cap counts chars, not grapheme clusters.
+        let unit = "e\u{301}"; // 2 chars per unit
+        let extra: String = unit.repeat(300); // 600 chars
+        let mut s = String::new();
+        append_capped(&mut s, &extra, MAX_QUERY_CHARS);
+        assert_eq!(s.chars().count(), 200);
+        let expected: String = extra.chars().take(200).collect();
+        assert_eq!(s, expected);
+        assert_valid(&s, MAX_QUERY_CHARS);
+    }
+
+    // ── Property-style loop test ────────────────────────────────────────────
+    #[test]
+    fn property_loop_never_panics_or_exceeds_cap() {
+        let alphabets: &[&str] = &[
+            "abcdefghij",            // ASCII
+            "éèêëàâîïôù",           // 2-byte
+            "日本語中文韓台港星嶼灣", // 3-byte CJK
+            "😀😁😂🤣😃😄😅😆😇😈", // 4-byte emoji
+        ];
+        for alpha in alphabets {
+            let pool: Vec<char> = alpha.chars().collect();
+            for n in 0..=400 {
+                let input: String = pool.iter().cycle().take(n).collect();
+                let mut s = String::new();
+                append_capped(&mut s, &input, MAX_QUERY_CHARS);
+                let count = s.chars().count();
+                assert!(count <= MAX_QUERY_CHARS,
+                    "n={n}, alphabet starts with {:?}: got {count} chars",
+                    pool.first());
+                let expected_count = n.min(MAX_QUERY_CHARS);
+                assert_eq!(count, expected_count,
+                    "n={n}: expected {expected_count} chars, got {count}");
+                let expected: String = input.chars().take(MAX_QUERY_CHARS).collect();
+                assert_eq!(s, expected);
+                assert!(s.is_char_boundary(s.len()));
+            }
+        }
     }
 }
