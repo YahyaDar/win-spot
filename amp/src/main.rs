@@ -1004,8 +1004,7 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
             }
             _ if ctrl && vk == b'V' as u16 => {
                 if let Some(t) = clipboard_text() {
-                    a.query.push_str(&spotify::clean(&t));
-                    a.query.truncate(200);
+                    spotify::append_capped(&mut a.query, &spotify::clean(&t), spotify::MAX_QUERY_CHARS);
                     a.inv_pl();
                 }
             }
@@ -1071,7 +1070,7 @@ fn char_in(c: u32) {
         return;
     }
     if a.typing {
-        if !ch.is_control() && a.query.chars().count() < 200 {
+        if !ch.is_control() && a.query.chars().count() < spotify::MAX_QUERY_CHARS {
             a.query.push(ch);
             a.inv_pl();
         }
