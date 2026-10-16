@@ -178,9 +178,7 @@ impl Engine {
 
     /// Start a Web API call; the answer arrives later as an `api` event with this id.
     pub fn api(&mut self, method: &str, path: &str, query: Value, body: Option<Value>) -> Option<u64> {
-        if self.stdin.is_none() {
-            return None;
-        }
+        self.stdin.as_ref()?;
         self.next_id += 1;
         let id = self.next_id;
         let q = if query.as_object().is_some_and(|o| !o.is_empty()) { query } else { Value::Null };

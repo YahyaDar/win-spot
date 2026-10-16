@@ -306,6 +306,7 @@ mod tests {
     /// 200 fell inside a multibyte character. This test reproduces that crash.
     #[test]
     #[should_panic]
+    #[allow(clippy::single_char_add_str)] // TODO: reproduces the exact old code which used push_str
     fn old_truncate_panics_on_multibyte() {
         // 199 ASCII bytes + "😀" (4 bytes) → 203 bytes; byte index 200 is inside
         // the emoji, so `truncate(200)` must panic.

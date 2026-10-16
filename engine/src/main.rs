@@ -461,10 +461,10 @@ async fn connect(o: &Opts, mixer: &Arc<SoftMixer>, tx: &Tx) -> Result<Link> {
                 continue;
             }
             if let Some(mut t) = track.take() {
-                if v["ev"] == "playing" || v["ev"] == "paused" {
-                    if v["uri"].as_str().is_some_and(|u| !u.is_empty()) {
-                        t["uri"] = v["uri"].clone();
-                    }
+                if (v["ev"] == "playing" || v["ev"] == "paused")
+                    && v["uri"].as_str().is_some_and(|u| !u.is_empty())
+                {
+                    t["uri"] = v["uri"].clone();
                 }
                 if etx.send(t).is_err() {
                     break;

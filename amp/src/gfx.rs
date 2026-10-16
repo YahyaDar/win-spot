@@ -116,6 +116,7 @@ impl Surface {
 
     /// Copy logical `w`x`h` from `src` at (sx, sy) to (dx, dy), clipped on both sides and
     /// scaled to the zoom.
+    #[allow(clippy::too_many_arguments)] // TODO: consider bundling coordinates into a Rect/BlitArgs struct
     pub fn blit(&mut self, src: Option<&Bitmap>, sx: i32, sy: i32, w: i32, h: i32, dx: i32, dy: i32) {
         let Some(src) = src else { return };
         let (mut sx, mut sy, mut dx, mut dy, mut w, mut h) = (sx, sy, dx, dy, w, h);
@@ -155,6 +156,7 @@ impl Surface {
     }
 
     /// Tile a sprite across a logical rectangle (playlist edges).
+    #[allow(clippy::too_many_arguments)] // TODO: consider bundling coordinates into a Rect/BlitArgs struct
     pub fn tile(&mut self, src: Option<&Bitmap>, sx: i32, sy: i32, sw: i32, sh: i32, dx: i32, dy: i32, w: i32, h: i32) {
         let mut y = 0;
         while y < h {
@@ -267,8 +269,8 @@ pub fn make_font(face: &str, height: i32, smooth: bool) -> HFONT {
     let mut lf: LOGFONTW = unsafe { std::mem::zeroed() };
     lf.lfHeight = -height.max(6);
     lf.lfWeight = FW_NORMAL as i32;
-    lf.lfCharSet = DEFAULT_CHARSET as u8;
-    lf.lfQuality = if smooth { CLEARTYPE_QUALITY as u8 } else { NONANTIALIASED_QUALITY as u8 };
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = if smooth { CLEARTYPE_QUALITY } else { NONANTIALIASED_QUALITY };
     for (i, c) in face.encode_utf16().take(31).enumerate() {
         lf.lfFaceName[i] = c;
     }

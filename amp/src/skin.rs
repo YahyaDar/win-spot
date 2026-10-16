@@ -299,7 +299,7 @@ pub fn decode_bmp(d: &[u8]) -> Option<Bitmap> {
             }
         }
         (0 | 3, 1 | 4 | 8 | 16 | 24 | 32) => {
-            let stride = ((w as usize * bpp + 31) / 32) * 4;
+            let stride = (w as usize * bpp).div_ceil(32) * 4;
             // 16/32-bit masks: BI_BITFIELDS stores them after the 40-byte header.
             let masks = if comp == 3 {
                 Some((u32le(d, 54)? as u32, u32le(d, 58)? as u32, u32le(d, 62)? as u32))
@@ -317,6 +317,7 @@ pub fn decode_bmp(d: &[u8]) -> Option<Bitmap> {
             for y in 0..h {
                 let row = d.get(off + row_of(y) as usize * stride..)?;
                 let out = &mut px[(y * w) as usize..((y + 1) * w) as usize];
+                #[allow(clippy::needless_range_loop)] // TODO: x indexes row as well as out
                 for x in 0..w as usize {
                     out[x] = match bpp {
                         1 => pal((*row.get(x / 8)? as usize >> (7 - x % 8)) & 1),
