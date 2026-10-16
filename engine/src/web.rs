@@ -19,7 +19,7 @@ const MAX_WAIT_429: u64 = 5;
 const MALFORMED: &str = "Spotify sent a malformed response";
 
 /// The token file, in the format SpoTerm's login writes.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Token {
     access_token: String,
     #[serde(default)]
@@ -50,6 +50,7 @@ pub struct Web {
 }
 
 /// A failed call: `status` 0 means it never got an HTTP answer.
+#[derive(Debug)]
 pub struct Failure {
     pub status: u16,
     pub msg: String,
@@ -207,12 +208,9 @@ impl Web {
                 rejected = Some(token); // expired or revoked early: refresh once and retry
                 continue;
             }
-            let retry_after = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .unwrap_or(0);
+            let retry_after = parse_retry_after(
+                resp.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()),
+            );
             if status == 429 && retry_after <= MAX_WAIT_429 && !retried {
                 retried = true;
                 tokio::time::sleep(Duration::from_secs(retry_after.max(1))).await;
@@ -223,22 +221,8 @@ impl Web {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
             }
-            let value = match read_json(resp).await {
-                // Player commands (shuffle, repeat, pause, ...) now answer 200 with a bare
-                // text id rather than JSON or nothing: that is still a success.
-                Err(f) if f.status == 0 && f.msg == MALFORMED && status < 400 => Value::Null,
-                other => other?,
-            };
-            if status >= 400 {
-                let msg = value["error"]["message"]
-                    .as_str()
-                    .or_else(|| value["error_description"].as_str())
-                    .or_else(|| value["error"].as_str())
-                    .unwrap_or("request failed")
-                    .to_string();
-                return Err(Failure { status, msg, body: value, retry_after });
-            }
-            return Ok((status, value));
+            let body = read_body(resp).await?;
+            return classify(status, retry_after, &body);
         }
     }
 }
@@ -257,8 +241,15 @@ fn net_failure(e: reqwest::Error) -> Failure {
     })
 }
 
-/// The body as JSON (empty is null), refusing anything over MAX_BODY.
-async fn read_json(mut resp: reqwest::Response) -> Result<Value, Failure> {
+/// Pure: header value to seconds (today's inline `RETRY_AFTER` parsing).
+fn parse_retry_after(header: Option<&str>) -> u64 {
+    header
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Size-limited body read (the streaming part of today's `read_json`).
+async fn read_body(mut resp: reqwest::Response) -> Result<Vec<u8>, Failure> {
     if resp.content_length().is_some_and(|n| n as usize > MAX_BODY) {
         return Err(Failure::net("response too large"));
     }
@@ -269,8 +260,218 @@ async fn read_json(mut resp: reqwest::Response) -> Result<Value, Failure> {
         }
         buf.extend_from_slice(&chunk);
     }
+    Ok(buf)
+}
+
+/// Pure: empty or whitespace is null; otherwise JSON, else the MALFORMED failure.
+fn parse_body(buf: &[u8]) -> Result<Value, Failure> {
     if buf.iter().all(u8::is_ascii_whitespace) {
         return Ok(Value::Null);
     }
-    serde_json::from_slice(&buf).map_err(|_| Failure::net(MALFORMED))
+    serde_json::from_slice(buf).map_err(|_| Failure::net(MALFORMED))
+}
+
+/// Pure: today's decision logic, unchanged.
+fn classify(status: u16, retry_after: u64, body: &[u8]) -> Result<(u16, Value), Failure> {
+    let value = match parse_body(body) {
+        // Player commands (shuffle, repeat, pause, ...) now answer 200 with a bare
+        // text id rather than JSON or nothing: that is still a success.
+        Err(f) if f.status == 0 && f.msg == MALFORMED && status < 400 => Value::Null,
+        other => other?,
+    };
+    if status >= 400 {
+        let msg = value["error"]["message"]
+            .as_str()
+            .or_else(|| value["error_description"].as_str())
+            .or_else(|| value["error"].as_str())
+            .unwrap_or("request failed")
+            .to_string();
+        return Err(Failure { status, msg, body: value, retry_after });
+    }
+    Ok((status, value))
+}
+
+/// The body as JSON (empty is null), refusing anything over MAX_BODY.
+async fn read_json(resp: reqwest::Response) -> Result<Value, Failure> {
+    let body = read_body(resp).await?;
+    parse_body(&body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_200_json_object() {
+        let (status, val) = classify(200, 0, b"{\"foo\":\"bar\"}").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(val["foo"], "bar");
+    }
+
+    #[test]
+    fn classify_200_empty_whitespace_and_204() {
+        let (s1, v1) = classify(200, 0, b"").unwrap();
+        assert_eq!(s1, 200);
+        assert_eq!(v1, Value::Null);
+        let (s2, v2) = classify(200, 0, b"   \r\n\t ").unwrap();
+        assert_eq!(s2, 200);
+        assert_eq!(v2, Value::Null);
+        let (s3, v3) = classify(204, 0, b"").unwrap();
+        assert_eq!(s3, 204);
+        assert_eq!(v3, Value::Null);
+    }
+
+    #[test]
+    fn classify_200_bare_text_id() {
+        let (status, val) = classify(200, 0, b"6mdiAmATAx73kdxrNrnlao").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(val, Value::Null);
+    }
+
+    #[test]
+    fn classify_400_with_error_object() {
+        let err = classify(400, 0, b"{\"error\":{\"status\":400,\"message\":\"bad\"}}").unwrap_err();
+        assert_eq!(err.status, 400);
+        assert_eq!(err.msg, "bad");
+    }
+
+    #[test]
+    fn classify_401_with_error_description() {
+        let err = classify(401, 0, b"{\"error\":\"invalid_grant\",\"error_description\":\"gone\"}").unwrap_err();
+        assert_eq!(err.status, 401);
+        assert_eq!(err.msg, "gone");
+    }
+
+    #[test]
+    fn classify_error_is_only_string() {
+        let err = classify(400, 0, b"{\"error\":\"oops\"}").unwrap_err();
+        assert_eq!(err.status, 400);
+        assert_eq!(err.msg, "oops");
+    }
+
+    #[test]
+    fn classify_json_error_no_usable_message() {
+        let err = classify(400, 0, b"{\"other\":\"field\"}").unwrap_err();
+        assert_eq!(err.status, 400);
+        assert_eq!(err.msg, "request failed");
+    }
+
+    #[test]
+    fn classify_429_json_with_retry_after() {
+        let err = classify(429, 7, b"{\"error\":{\"message\":\"slow down\"}}").unwrap_err();
+        assert_eq!(err.status, 429);
+        assert_eq!(err.retry_after, 7);
+        assert_eq!(err.msg, "slow down");
+    }
+
+    #[test]
+    fn classify_500_json() {
+        let err = classify(500, 0, b"{\"error\":{\"message\":\"server error\"}}").unwrap_err();
+        assert_eq!(err.status, 500);
+        assert_eq!(err.msg, "server error");
+    }
+
+    #[test]
+    fn classify_200_array_number_string() {
+        let (s_arr, v_arr) = classify(200, 0, b"[1, 2, 3]").unwrap();
+        assert_eq!(s_arr, 200);
+        assert_eq!(v_arr, json!([1, 2, 3]));
+
+        let (s_num, v_num) = classify(200, 0, b"42").unwrap();
+        assert_eq!(s_num, 200);
+        assert_eq!(v_num, json!(42));
+
+        let (s_str, v_str) = classify(200, 0, b"\"hello\"").unwrap();
+        assert_eq!(s_str, 200);
+        assert_eq!(v_str, json!("hello"));
+    }
+
+    #[test]
+    fn parse_body_nested_array_limit() {
+        let bad = vec![b'['; 10_000];
+        let err = parse_body(&bad).unwrap_err();
+        assert_eq!(err.msg, MALFORMED);
+    }
+
+    #[test]
+    fn parse_body_invalid_utf8() {
+        let bad = &[0xFF, 0xFE, 0xFD];
+        let res = parse_body(bad);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().msg, MALFORMED);
+    }
+
+    #[test]
+    fn bug_02_current_behavior_429_non_json() {
+        // BUG-02: current behavior: non-JSON 429 body drops status 429 and retry_after, returning status 0
+        let err = classify(429, 7, b"API rate limit exceeded").unwrap_err();
+        assert_eq!(err.status, 0);
+        assert_eq!(err.msg, MALFORMED);
+    }
+
+    #[test]
+    #[ignore = "BUG-02"]
+    fn bug_02_desired_behavior_429_non_json() {
+        let err = classify(429, 7, b"API rate limit exceeded").unwrap_err();
+        assert_eq!(err.status, 429);
+        assert_eq!(err.retry_after, 7);
+    }
+
+    #[test]
+    fn test_parse_retry_after() {
+        assert_eq!(parse_retry_after(Some("30")), 30);
+        assert_eq!(parse_retry_after(Some(" 30 ")), 30);
+        assert_eq!(parse_retry_after(Some("abc")), 0);
+        assert_eq!(parse_retry_after(Some("-1")), 0);
+        assert_eq!(parse_retry_after(Some("")), 0);
+        assert_eq!(parse_retry_after(None), 0);
+        assert_eq!(parse_retry_after(Some("Wed, 21 Oct 2015 07:28:00 GMT")), 0);
+    }
+
+    #[test]
+    fn token_file_contract_python_format() {
+        let json_str = r#"{"access_token":"a","token_type":"Bearer","expires_in":3599,"expires_at":1790000000,"refresh_token":"r","scope":"streaming user-library-read","pkce":true}"#;
+        let tok: Token = serde_json::from_str(json_str).unwrap();
+        assert_eq!(tok.access_token, "a");
+        assert_eq!(tok.token_type, "Bearer");
+        assert_eq!(tok.expires_at, 1790000000.0);
+        assert_eq!(tok.refresh_token, "r");
+        assert_eq!(tok.scope, "streaming user-library-read");
+        assert!(tok.pkce);
+    }
+
+    #[test]
+    fn token_file_contract_minimal_defaults() {
+        let json_str = r#"{"access_token":"a"}"#;
+        let tok: Token = serde_json::from_str(json_str).unwrap();
+        assert_eq!(tok.access_token, "a");
+        assert_eq!(tok.token_type, "Bearer");
+        assert_eq!(tok.expires_at, 0.0);
+        assert_eq!(tok.refresh_token, "");
+        assert_eq!(tok.scope, "");
+        assert!(!tok.pkce);
+    }
+
+    #[test]
+    fn token_file_contract_missing_access_token_and_extra_keys() {
+        assert!(serde_json::from_str::<Token>(r#"{"refresh_token":"r"}"#).is_err());
+        let extra = r#"{"access_token":"a","unknown_key":"ignored","extra_num":123}"#;
+        let tok: Token = serde_json::from_str(extra).unwrap();
+        assert_eq!(tok.access_token, "a");
+    }
+
+    #[test]
+    fn token_file_contract_roundtrip() {
+        let tok = Token {
+            access_token: "tok123".into(),
+            refresh_token: "ref456".into(),
+            expires_at: 1234567.89,
+            scope: "streaming".into(),
+            pkce: true,
+            token_type: "Bearer".into(),
+        };
+        let serialized = serde_json::to_string(&tok).unwrap();
+        let parsed: Token = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(tok, parsed);
+    }
 }
