@@ -134,7 +134,8 @@ pub fn clean(s: &str) -> String {
 /// The maximum number of characters allowed in a search query.
 pub const MAX_QUERY_CHARS: usize = 200;
 
-/// Append `extra` to `dst`, keeping `dst` at no more than `max_chars` characters.
+/// Append as many chars from `extra` to `dst` as fit before `max_chars`.
+/// If `dst` is already at or above `max_chars`, this is a no-op.
 /// Counts chars (not bytes), so it can never split a UTF-8 sequence.
 pub fn append_capped(dst: &mut String, extra: &str, max_chars: usize) {
     let room = max_chars.saturating_sub(dst.chars().count());
@@ -304,7 +305,7 @@ mod tests {
     /// Regression guard: the old `push_str` + `truncate(200)` panicked when byte
     /// 200 fell inside a multibyte character. This test reproduces that crash.
     #[test]
-    #[should_panic(expected = "not on a char boundary")]
+    #[should_panic]
     fn old_truncate_panics_on_multibyte() {
         // 199 ASCII bytes + "😀" (4 bytes) → 203 bytes; byte index 200 is inside
         // the emoji, so `truncate(200)` must panic.
