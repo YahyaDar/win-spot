@@ -102,7 +102,12 @@ mod tests {
             use std::sync::atomic::{AtomicU64, Ordering};
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("spoterm-crash-test-{}-{}-{}", prefix, std::process::id(), id));
+            let path = std::env::temp_dir().join(format!(
+                "spoterm-crash-test-{}-{}-{}",
+                prefix,
+                std::process::id(),
+                id
+            ));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -137,14 +142,8 @@ mod tests {
         assert!(report.contains("frame 0: foo"));
 
         // location: None
-        let report_noloc = format_report(
-            "1.2.3",
-            1700000000,
-            "main",
-            "panic message",
-            None,
-            "trace",
-        );
+        let report_noloc =
+            format_report("1.2.3", 1700000000, "main", "panic message", None, "trace");
         assert!(report_noloc.contains("Location:  <unknown location>"));
         assert!(report_noloc.contains("panic message"));
     }

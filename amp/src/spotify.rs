@@ -38,7 +38,11 @@ impl Track {
 
     /// "Artist - Title", the way Winamp names a song.
     pub fn label(&self) -> String {
-        if self.artists.is_empty() { self.name.clone() } else { format!("{} - {}", self.artists, self.name) }
+        if self.artists.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{} - {}", self.artists, self.name)
+        }
     }
 }
 
@@ -51,15 +55,27 @@ pub enum Repeat {
 
 impl Repeat {
     pub fn parse(s: &str) -> Repeat {
-        match s { "context" => Repeat::Context, "track" => Repeat::Track, _ => Repeat::Off }
+        match s {
+            "context" => Repeat::Context,
+            "track" => Repeat::Track,
+            _ => Repeat::Off,
+        }
     }
 
     pub fn as_str(self) -> &'static str {
-        match self { Repeat::Off => "off", Repeat::Context => "context", Repeat::Track => "track" }
+        match self {
+            Repeat::Off => "off",
+            Repeat::Context => "context",
+            Repeat::Track => "track",
+        }
     }
 
     pub fn next(self) -> Repeat {
-        match self { Repeat::Off => Repeat::Context, Repeat::Context => Repeat::Track, Repeat::Track => Repeat::Off }
+        match self {
+            Repeat::Off => Repeat::Context,
+            Repeat::Context => Repeat::Track,
+            Repeat::Track => Repeat::Off,
+        }
     }
 }
 
@@ -116,7 +132,10 @@ pub struct Page {
 /// Spotify's numbers, tolerating null, floats or strings.
 pub fn num(v: &Value) -> u64 {
     match v {
-        Value::Number(n) => n.as_u64().or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64)).unwrap_or(0),
+        Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))
+            .unwrap_or(0),
         Value::String(s) => s.trim().parse().unwrap_or(0),
         _ => 0,
     }
@@ -146,17 +165,27 @@ pub fn track(item: &Value, pos: u32, is_local: bool) -> Option<Track> {
     let uri = item.get("uri")?.as_str()?;
     // With a market, Spotify swaps in a regional copy of some tracks (relinking). Keep the
     // original URI: it's the one in the playlist and the one the player reports.
-    let uri = item["linked_from"]["uri"].as_str().filter(|u| u.starts_with("spotify:")).unwrap_or(uri);
+    let uri = item["linked_from"]["uri"]
+        .as_str()
+        .filter(|u| u.starts_with("spotify:"))
+        .unwrap_or(uri);
     let (artists, album) = if item["type"] == "episode" {
         (text(&item["show"]["name"]), String::new())
     } else {
-        let names: Vec<String> = item["artists"].as_array().map(|a| a.iter().map(|x| text(&x["name"])).collect()).unwrap_or_default();
+        let names: Vec<String> = item["artists"]
+            .as_array()
+            .map(|a| a.iter().map(|x| text(&x["name"])).collect())
+            .unwrap_or_default();
         (names.join(", "), text(&item["album"]["name"]))
     };
     let name = text(&item["name"]);
     Some(Track {
         uri: clean(uri),
-        name: if name.is_empty() { "Unknown".into() } else { name },
+        name: if name.is_empty() {
+            "Unknown".into()
+        } else {
+            name
+        },
         artists,
         album,
         duration_ms: num(&item["duration_ms"]).min(u32::MAX as u64) as u32,
@@ -177,33 +206,59 @@ pub fn page(r: &Value, offset: u32, get_item: impl Fn(&Value) -> &Value) -> Page
     let n = items.len() as u32;
     let total = (num(&r["total"]) as u32).max(offset + n);
     let next_offset = (r["next"].is_string() && n > 0).then_some(offset + n);
-    Page { tracks, total, next_offset }
+    Page {
+        tracks,
+        total,
+        next_offset,
+    }
 }
 
 pub fn playlists(r: &Value, out: &mut Vec<Playlist>) {
     for p in r["items"].as_array().into_iter().flatten() {
         // The id goes into a request path, so only Spotify's base62 ids are taken.
-        let Some(id) = p["id"].as_str().filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())) else { continue };
-        let Some(uri) = p["uri"].as_str() else { continue };
-        let counts = if p["tracks"].is_object() { &p["tracks"] } else { &p["items"] };
+        let Some(id) = p["id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))
+        else {
+            continue;
+        };
+        let Some(uri) = p["uri"].as_str() else {
+            continue;
+        };
+        let counts = if p["tracks"].is_object() {
+            &p["tracks"]
+        } else {
+            &p["items"]
+        };
         let name = text(&p["name"]);
         out.push(Playlist {
             id: id.into(),
             uri: clean(uri),
-            name: if name.is_empty() { "Untitled".into() } else { name },
+            name: if name.is_empty() {
+                "Untitled".into()
+            } else {
+                name
+            },
             total: num(&counts["total"]) as u32,
         });
     }
 }
 
 pub fn devices(r: &Value) -> Vec<Device> {
-    r["devices"].as_array().into_iter().flatten()
+    r["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|d| {
             let id = d["id"].as_str().filter(|s| !s.is_empty())?;
             let name = text(&d["name"]);
             Some(Device {
                 id: clean(id),
-                name: if name.is_empty() { "Unknown".into() } else { name },
+                name: if name.is_empty() {
+                    "Unknown".into()
+                } else {
+                    name
+                },
                 kind: text(&d["type"]),
                 active: d["is_active"] == true,
             })
@@ -224,7 +279,8 @@ pub fn playback(r: &Value, now: Instant) -> Option<Playback> {
         at: now,
         device_id: dev["id"].as_str().map(clean),
         device_name: text(&dev["name"]),
-        volume: (!vol.is_null() && dev["supports_volume"] != false).then(|| num(vol).min(100) as u8),
+        volume: (!vol.is_null() && dev["supports_volume"] != false)
+            .then(|| num(vol).min(100) as u8),
         shuffle: r["shuffle_state"] == true,
         repeat: Repeat::parse(r["repeat_state"].as_str().unwrap_or("off")),
         context_uri: r["context"]["uri"].as_str().map(clean),
@@ -263,13 +319,23 @@ impl ApiError {
             return "Spotify sign-in expired: choose Sign in again from the menu".into();
         }
         if self.status == 0 {
-            return if self.msg.is_empty() { "Network error: can't reach Spotify".into() } else { self.msg.clone() };
+            return if self.msg.is_empty() {
+                "Network error: can't reach Spotify".into()
+            } else {
+                self.msg.clone()
+            };
         }
         let reason = self.msg.rsplit(':').next().unwrap_or("").trim();
-        let reason = if reason.is_empty() { format!("HTTP {}", self.status) } else { reason.to_string() };
+        let reason = if reason.is_empty() {
+            format!("HTTP {}", self.status)
+        } else {
+            reason.to_string()
+        };
         match self.status {
             404 if self.no_device() => "No active device: pick one from the menu".into(),
-            403 if self.msg.to_lowercase().contains("premium") => "Spotify Premium is required for playback".into(),
+            403 if self.msg.to_lowercase().contains("premium") => {
+                "Spotify Premium is required for playback".into()
+            }
             403 => format!("Not allowed: {reason}"),
             429 => "Rate limited by Spotify, slowing down".into(),
             _ => reason,
@@ -279,7 +345,11 @@ impl ApiError {
 
 pub fn fmt_time(ms: u32) -> String {
     let s = ms / 1000;
-    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
 }
 
 #[cfg(test)]
@@ -292,11 +362,27 @@ mod tests {
         assert!(track(&json!({"name": "x"}), 0, false).is_none());
         let t = track(&json!({"uri": "spotify:track:1", "name": "a\u{1b}[2Jb", "artists": [{"name": 3}, {"name": "Z"}],
                               "duration_ms": "12", "linked_from": {"uri": "spotify:track:0"}}), 4, false).unwrap();
-        assert_eq!((t.uri.as_str(), t.name.as_str(), t.artists.as_str(), t.duration_ms, t.pos), ("spotify:track:0", "a[2Jb", ", Z", 12, 4));
-        let p = page(&json!({"items": [{"track": {"uri": "spotify:track:2"}}, 5], "total": 1, "next": "x"}), 10, |i| &i["track"]);
+        assert_eq!(
+            (
+                t.uri.as_str(),
+                t.name.as_str(),
+                t.artists.as_str(),
+                t.duration_ms,
+                t.pos
+            ),
+            ("spotify:track:0", "a[2Jb", ", Z", 12, 4)
+        );
+        let p = page(
+            &json!({"items": [{"track": {"uri": "spotify:track:2"}}, 5], "total": 1, "next": "x"}),
+            10,
+            |i| &i["track"],
+        );
         assert_eq!((p.tracks.len(), p.total, p.next_offset), (1, 12, Some(12)));
         assert!(playback(&json!({}), Instant::now()).is_none());
-        let e = ApiError::from_event(&json!({"status": 404, "error": "Player command failed: No active device found"})).unwrap();
+        let e = ApiError::from_event(
+            &json!({"status": 404, "error": "Player command failed: No active device found"}),
+        )
+        .unwrap();
         assert!(e.no_device());
         assert!(ApiError::from_event(&json!({"status": 204, "body": null})).is_none());
     }
@@ -317,7 +403,11 @@ mod tests {
 
     // ── append_capped tests ─────────────────────────────────────────────────
     fn assert_valid(s: &str, max: usize) {
-        assert!(s.chars().count() <= max, "char count {} exceeds {max}", s.chars().count());
+        assert!(
+            s.chars().count() <= max,
+            "char count {} exceeds {max}",
+            s.chars().count()
+        );
         assert!(s.is_char_boundary(s.len()));
         assert_eq!(s, String::from_utf8(s.as_bytes().to_vec()).unwrap());
     }
@@ -512,10 +602,10 @@ mod tests {
     #[test]
     fn property_loop_never_panics_or_exceeds_cap() {
         let alphabets: &[&str] = &[
-            "abcdefghij",            // ASCII
-            "éèêëàâîïôù",           // 2-byte
+            "abcdefghij",             // ASCII
+            "éèêëàâîïôù",             // 2-byte
             "日本語中文韓台港星嶼灣", // 3-byte CJK
-            "😀😁😂🤣😃😄😅😆😇😈", // 4-byte emoji
+            "😀😁😂🤣😃😄😅😆😇😈",   // 4-byte emoji
         ];
         for alpha in alphabets {
             let pool: Vec<char> = alpha.chars().collect();
@@ -524,12 +614,16 @@ mod tests {
                 let mut s = String::new();
                 append_capped(&mut s, &input, MAX_QUERY_CHARS);
                 let count = s.chars().count();
-                assert!(count <= MAX_QUERY_CHARS,
+                assert!(
+                    count <= MAX_QUERY_CHARS,
                     "n={n}, alphabet starts with {:?}: got {count} chars",
-                    pool.first());
+                    pool.first()
+                );
                 let expected_count = n.min(MAX_QUERY_CHARS);
-                assert_eq!(count, expected_count,
-                    "n={n}: expected {expected_count} chars, got {count}");
+                assert_eq!(
+                    count, expected_count,
+                    "n={n}: expected {expected_count} chars, got {count}"
+                );
                 let expected: String = input.chars().take(MAX_QUERY_CHARS).collect();
                 assert_eq!(s, expected);
                 assert!(s.is_char_boundary(s.len()));
@@ -753,7 +847,10 @@ mod tests {
             repeat: Repeat::Off,
             context_uri: None,
         };
-        assert_eq!(pb_unknown.progress(start + Duration::from_millis(10_000)), 60_000);
+        assert_eq!(
+            pb_unknown.progress(start + Duration::from_millis(10_000)),
+            60_000
+        );
 
         // rebase
         pb.playing = true;
@@ -765,39 +862,93 @@ mod tests {
     #[test]
     fn test_api_error_describe() {
         // login
-        let e_login = ApiError { status: 401, msg: "Token expired".into(), login: true, retry_after: 0 };
-        assert_eq!(e_login.describe(), "Spotify sign-in expired: choose Sign in again from the menu");
+        let e_login = ApiError {
+            status: 401,
+            msg: "Token expired".into(),
+            login: true,
+            retry_after: 0,
+        };
+        assert_eq!(
+            e_login.describe(),
+            "Spotify sign-in expired: choose Sign in again from the menu"
+        );
 
         // status 0 with message
-        let e_s0_msg = ApiError { status: 0, msg: "Connection refused".into(), login: false, retry_after: 0 };
+        let e_s0_msg = ApiError {
+            status: 0,
+            msg: "Connection refused".into(),
+            login: false,
+            retry_after: 0,
+        };
         assert_eq!(e_s0_msg.describe(), "Connection refused");
 
         // status 0 without message
-        let e_s0_nomsg = ApiError { status: 0, msg: "".into(), login: false, retry_after: 0 };
+        let e_s0_nomsg = ApiError {
+            status: 0,
+            msg: "".into(),
+            login: false,
+            retry_after: 0,
+        };
         assert_eq!(e_s0_nomsg.describe(), "Network error: can't reach Spotify");
 
         // 404 device
-        let e_404_dev = ApiError { status: 404, msg: "No active device".into(), login: false, retry_after: 0 };
-        assert_eq!(e_404_dev.describe(), "No active device: pick one from the menu");
+        let e_404_dev = ApiError {
+            status: 404,
+            msg: "No active device".into(),
+            login: false,
+            retry_after: 0,
+        };
+        assert_eq!(
+            e_404_dev.describe(),
+            "No active device: pick one from the menu"
+        );
 
         // 403 premium
-        let e_403_prem = ApiError { status: 403, msg: "Premium required".into(), login: false, retry_after: 0 };
-        assert_eq!(e_403_prem.describe(), "Spotify Premium is required for playback");
+        let e_403_prem = ApiError {
+            status: 403,
+            msg: "Premium required".into(),
+            login: false,
+            retry_after: 0,
+        };
+        assert_eq!(
+            e_403_prem.describe(),
+            "Spotify Premium is required for playback"
+        );
 
         // other 403
-        let e_403_other = ApiError { status: 403, msg: "Forbidden: user not registered".into(), login: false, retry_after: 0 };
+        let e_403_other = ApiError {
+            status: 403,
+            msg: "Forbidden: user not registered".into(),
+            login: false,
+            retry_after: 0,
+        };
         assert_eq!(e_403_other.describe(), "Not allowed: user not registered");
 
         // 429
-        let e_429 = ApiError { status: 429, msg: "".into(), login: false, retry_after: 5 };
+        let e_429 = ApiError {
+            status: 429,
+            msg: "".into(),
+            login: false,
+            retry_after: 5,
+        };
         assert_eq!(e_429.describe(), "Rate limited by Spotify, slowing down");
 
         // generic reason after last colon
-        let e_generic = ApiError { status: 500, msg: "Server Error: Internal server error".into(), login: false, retry_after: 0 };
+        let e_generic = ApiError {
+            status: 500,
+            msg: "Server Error: Internal server error".into(),
+            login: false,
+            retry_after: 0,
+        };
         assert_eq!(e_generic.describe(), "Internal server error");
 
         // generic reason without message
-        let e_no_reason = ApiError { status: 502, msg: "".into(), login: false, retry_after: 0 };
+        let e_no_reason = ApiError {
+            status: 502,
+            msg: "".into(),
+            login: false,
+            retry_after: 0,
+        };
         assert_eq!(e_no_reason.describe(), "HTTP 502");
     }
 

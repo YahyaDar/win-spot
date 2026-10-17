@@ -37,9 +37,9 @@ use librespot_core::{authentication::Credentials, Session, SessionConfig};
 use librespot_metadata::audio::UniqueFields;
 use librespot_oauth::OAuthClientBuilder;
 use librespot_playback::audio_backend::{self, Sink, SinkBuilder, SinkError, SinkResult};
+use librespot_playback::config::{AudioFormat, Bitrate, PlayerConfig};
 use librespot_playback::convert::Converter;
 use librespot_playback::decoder::AudioPacket;
-use librespot_playback::config::{AudioFormat, Bitrate, PlayerConfig};
 use librespot_playback::mixer::softmixer::SoftMixer;
 use librespot_playback::mixer::{Mixer, MixerConfig};
 use librespot_playback::player::{Player, PlayerEvent};
@@ -104,9 +104,11 @@ fn main() {
         "login" => login(&opts),
         "weblogin" => web_login(&opts),
         "run" => run(opts),
-        _ => bail!("usage: spoterm-engine login|run --cache DIR [--client-id ID --token FILE] \
+        _ => bail!(
+            "usage: spoterm-engine login|run --cache DIR [--client-id ID --token FILE] \
                     [--name N] [--bitrate 96|160|320] [--volume PCT] [--no-player]\n\
-                    \x20      spoterm-engine weblogin --client-id ID --token FILE [--redirect URI]"),
+                    \x20      spoterm-engine weblogin --client-id ID --token FILE [--redirect URI]"
+        ),
     });
     if let Err(e) = result {
         eprintln!("spoterm-engine: {e:#}");
@@ -135,7 +137,9 @@ fn parse_args_from(mut args: impl Iterator<Item = String>) -> Result<(String, Op
             opts.player = false;
             continue;
         }
-        let value = args.next().with_context(|| format!("{flag} needs a value"))?;
+        let value = args
+            .next()
+            .with_context(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--cache" => opts.cache = PathBuf::from(value),
             "--name" => opts.name = value,
@@ -198,10 +202,14 @@ fn session_config(dir: &Path) -> SessionConfig {
 fn login(o: &Opts) -> Result<()> {
     let client = OAuthClientBuilder::new(CLIENT_ID, REDIRECT_URI, SCOPES.to_vec())
         .open_in_browser()
-        .with_custom_message("SpoTerm is signed in. You can close this tab and go back to the terminal.")
+        .with_custom_message(
+            "SpoTerm is signed in. You can close this tab and go back to the terminal.",
+        )
         .build()
         .map_err(|e| anyhow!("{e}"))?;
-    let token = client.get_access_token().map_err(|e| anyhow!("login failed: {e}"))?;
+    let token = client
+        .get_access_token()
+        .map_err(|e| anyhow!("login failed: {e}"))?;
     runtime()?.block_on(async {
         let session = Session::new(session_config(&o.cache), Some(open_cache(&o.cache)?));
         // store_credentials=true swaps the one-shot token for reusable credentials.
@@ -219,19 +227,27 @@ fn login(o: &Opts) -> Result<()> {
 fn web_login(o: &Opts) -> Result<()> {
     let loopback = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"];
     if !loopback.iter().any(|p| o.redirect.starts_with(p)) {
-        bail!("the redirect URI must be http://127.0.0.1:PORT/... (got {})", o.redirect);
+        bail!(
+            "the redirect URI must be http://127.0.0.1:PORT/... (got {})",
+            o.redirect
+        );
     }
     let client = OAuthClientBuilder::new(&o.client_id, &o.redirect, WEB_SCOPES.to_vec())
         .open_in_browser()
         .with_custom_message("SpoTerm is signed in. You can close this tab.")
         .build()
         .map_err(|e| anyhow!("{e}"))?;
-    let token = client.get_access_token().map_err(|e| anyhow!("sign-in failed: {e}"))?;
+    let token = client
+        .get_access_token()
+        .map_err(|e| anyhow!("sign-in failed: {e}"))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let expires_in = token.expires_at.saturating_duration_since(Instant::now()).as_secs();
+    let expires_in = token
+        .expires_at
+        .saturating_duration_since(Instant::now())
+        .as_secs();
     let body = json!({
         "access_token": token.access_token,
         "refresh_token": token.refresh_token,
@@ -297,10 +313,18 @@ enum Cmd {
     Toggle,
     Next,
     Prev,
-    Seek { ms: u32 },
-    Volume { pct: u8 },
-    Shuffle { on: bool },
-    Repeat { mode: String },
+    Seek {
+        ms: u32,
+    },
+    Volume {
+        pct: u8,
+    },
+    Shuffle {
+        on: bool,
+    },
+    Repeat {
+        mode: String,
+    },
     Activate,
     /// Retry the player connection now instead of waiting out the backoff.
     Reconnect,
@@ -443,12 +467,21 @@ async fn connect(o: &Opts, mixer: &Arc<SoftMixer>, tx: &Tx) -> Result<Link> {
     let backend = audio_backend::find(None).context("no audio backend available")?;
     let config = PlayerConfig {
         bitrate: o.bitrate,
-        ..Default::default()   // no periodic position events: SpoTerm interpolates locally
+        ..Default::default() // no periodic position events: SpoTerm interpolates locally
     };
     let sink_tx = tx.clone();
-    let player = Player::new(config, session.clone(), mixer.get_soft_volume(), move || {
-        Box::new(LazySink { backend, sink: None, tx: sink_tx }) as Box<dyn Sink>
-    });
+    let player = Player::new(
+        config,
+        session.clone(),
+        mixer.get_soft_volume(),
+        move || {
+            Box::new(LazySink {
+                backend,
+                sink: None,
+                tx: sink_tx,
+            }) as Box<dyn Sink>
+        },
+    );
 
     let mut events = player.get_player_event_channel();
     let etx = tx.clone();
@@ -487,11 +520,21 @@ async fn connect(o: &Opts, mixer: &Arc<SoftMixer>, tx: &Tx) -> Result<Link> {
         disable_volume: false,
         volume_steps: 64,
     };
-    let (spirc, task) = Spirc::new(connect_config, session.clone(), creds, player.clone(), mixer.clone())
-        .await
-        .map_err(|e| anyhow!("start Connect device: {e}"))?;
+    let (spirc, task) = Spirc::new(
+        connect_config,
+        session.clone(),
+        creds,
+        player.clone(),
+        mixer.clone(),
+    )
+    .await
+    .map_err(|e| anyhow!("start Connect device: {e}"))?;
     tokio::spawn(task);
-    Ok(Link { spirc, player, session })
+    Ok(Link {
+        spirc,
+        player,
+        session,
+    })
 }
 
 /// Opens the sound device only while audio plays. rodio keeps its output stream, and the
@@ -513,8 +556,13 @@ impl LazySink {
             match opened {
                 Ok(sink) => self.sink = Some(sink),
                 Err(_) => {
-                    send(&self.tx, json!({"ev": "error", "cmd": "audio", "msg": "no audio output device available"}));
-                    return Err(SinkError::ConnectionRefused("no audio output device".into()));
+                    send(
+                        &self.tx,
+                        json!({"ev": "error", "cmd": "audio", "msg": "no audio output device available"}),
+                    );
+                    return Err(SinkError::ConnectionRefused(
+                        "no audio output device".into(),
+                    ));
                 }
             }
         }
@@ -544,12 +592,17 @@ impl Sink for LazySink {
 
 fn is_credentials_error(e: &anyhow::Error) -> bool {
     let s = format!("{e:#}");
-    s.contains("INVALID_CREDENTIALS") || s.contains("BadCredentials") || s.contains("Bad credentials")
+    s.contains("INVALID_CREDENTIALS")
+        || s.contains("BadCredentials")
+        || s.contains("Bad credentials")
 }
 
 fn handle(link: Option<&Link>, mixer: &Arc<SoftMixer>, tx: &Tx, cmd: Cmd) {
     let Some(link) = link else {
-        send(tx, json!({"ev": "error", "cmd": "player", "msg": "SpoTerm's player isn't connected yet"}));
+        send(
+            tx,
+            json!({"ev": "error", "cmd": "player", "msg": "SpoTerm's player isn't connected yet"}),
+        );
         return;
     };
     let spirc = &link.spirc;
@@ -559,17 +612,35 @@ fn handle(link: Option<&Link>, mixer: &Arc<SoftMixer>, tx: &Tx, cmd: Cmd) {
         let _ = spirc.activate();
     };
     let (name, result) = match cmd {
-        Cmd::PlayContext { uri, track_uri, index, position_ms, shuffle, repeat } => {
+        Cmd::PlayContext {
+            uri,
+            track_uri,
+            index,
+            position_ms,
+            shuffle,
+            repeat,
+        } => {
             activate();
             let options = LoadRequestOptions {
                 start_playing: true,
                 seek_to: position_ms,
                 context_options: Some(play_options(shuffle, &repeat)),
-                playing_track: track_uri.map(PlayingTrack::Uri).or(index.map(PlayingTrack::Index)),
+                playing_track: track_uri
+                    .map(PlayingTrack::Uri)
+                    .or(index.map(PlayingTrack::Index)),
             };
-            ("play_context", spirc.load(LoadRequest::from_context_uri(uri, options)))
+            (
+                "play_context",
+                spirc.load(LoadRequest::from_context_uri(uri, options)),
+            )
         }
-        Cmd::PlayTracks { uris, start_uri, position_ms, shuffle, repeat } => {
+        Cmd::PlayTracks {
+            uris,
+            start_uri,
+            position_ms,
+            shuffle,
+            repeat,
+        } => {
             activate();
             let options = LoadRequestOptions {
                 start_playing: true,
@@ -577,20 +648,41 @@ fn handle(link: Option<&Link>, mixer: &Arc<SoftMixer>, tx: &Tx, cmd: Cmd) {
                 context_options: Some(play_options(shuffle, &repeat)),
                 playing_track: start_uri.map(PlayingTrack::Uri),
             };
-            ("play_tracks", spirc.load(LoadRequest::from_tracks(uris, options)))
+            (
+                "play_tracks",
+                spirc.load(LoadRequest::from_tracks(uris, options)),
+            )
         }
-        Cmd::Play => { activate(); ("play", spirc.play()) }
+        Cmd::Play => {
+            activate();
+            ("play", spirc.play())
+        }
         Cmd::Pause => ("pause", spirc.pause()),
-        Cmd::Toggle => { activate(); ("toggle", spirc.play_pause()) }
-        Cmd::Next => { activate(); ("next", spirc.next()) }
-        Cmd::Prev => { activate(); ("prev", spirc.prev()) }
-        Cmd::Seek { ms } => { activate(); ("seek", spirc.set_position_ms(ms)) }
+        Cmd::Toggle => {
+            activate();
+            ("toggle", spirc.play_pause())
+        }
+        Cmd::Next => {
+            activate();
+            ("next", spirc.next())
+        }
+        Cmd::Prev => {
+            activate();
+            ("prev", spirc.prev())
+        }
+        Cmd::Seek { ms } => {
+            activate();
+            ("seek", spirc.set_position_ms(ms))
+        }
         Cmd::Volume { pct } => {
             let v = from_pct(pct);
-            mixer.set_volume(v);   // audible immediately, Connect sync follows
+            mixer.set_volume(v); // audible immediately, Connect sync follows
             ("volume", spirc.set_volume(v))
         }
-        Cmd::Shuffle { on } => { activate(); ("shuffle", spirc.shuffle(on)) }
+        Cmd::Shuffle { on } => {
+            activate();
+            ("shuffle", spirc.shuffle(on))
+        }
         Cmd::Repeat { mode } => {
             activate();
             let r = match mode.as_str() {
@@ -604,7 +696,11 @@ fn handle(link: Option<&Link>, mixer: &Arc<SoftMixer>, tx: &Tx, cmd: Cmd) {
         Cmd::Api { .. } | Cmd::Reconnect | Cmd::Quit => return,
     };
     if let Err(e) = result {
-        let msg = if link.session.is_invalid() { "reconnecting to Spotify".to_string() } else { e.to_string() };
+        let msg = if link.session.is_invalid() {
+            "reconnecting to Spotify".to_string()
+        } else {
+            e.to_string()
+        };
         send(tx, json!({"ev": "error", "cmd": name, "msg": msg}));
     }
 }
@@ -626,23 +722,49 @@ fn event_json(ev: PlayerEvent) -> Option<Value> {
         P::TrackChanged { audio_item: item } => {
             let (artists, album) = match &item.unique_fields {
                 UniqueFields::Track { artists, album, .. } => (
-                    artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "),
+                    artists
+                        .iter()
+                        .map(|a| a.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     album.clone(),
                 ),
                 UniqueFields::Episode { show_name, .. } => (show_name.clone(), String::new()),
-                UniqueFields::Local { artists, album, .. } => {
-                    (artists.clone().unwrap_or_default(), album.clone().unwrap_or_default())
-                }
+                UniqueFields::Local { artists, album, .. } => (
+                    artists.clone().unwrap_or_default(),
+                    album.clone().unwrap_or_default(),
+                ),
             };
             json!({
                 "ev": "track", "uri": item.uri, "name": item.name, "artists": artists,
                 "album": album, "duration_ms": item.duration_ms,
             })
         }
-        P::Playing { track_id, position_ms, .. } => json!({"ev": "playing", "uri": uri(&track_id), "pos": position_ms}),
-        P::Paused { track_id, position_ms, .. } => json!({"ev": "paused", "uri": uri(&track_id), "pos": position_ms}),
-        P::Loading { track_id, position_ms, .. } => json!({"ev": "loading", "uri": uri(&track_id), "pos": position_ms}),
-        P::Seeked { track_id, position_ms, .. } | P::PositionCorrection { track_id, position_ms, .. } => {
+        P::Playing {
+            track_id,
+            position_ms,
+            ..
+        } => json!({"ev": "playing", "uri": uri(&track_id), "pos": position_ms}),
+        P::Paused {
+            track_id,
+            position_ms,
+            ..
+        } => json!({"ev": "paused", "uri": uri(&track_id), "pos": position_ms}),
+        P::Loading {
+            track_id,
+            position_ms,
+            ..
+        } => json!({"ev": "loading", "uri": uri(&track_id), "pos": position_ms}),
+        P::Seeked {
+            track_id,
+            position_ms,
+            ..
+        }
+        | P::PositionCorrection {
+            track_id,
+            position_ms,
+            ..
+        } => {
             json!({"ev": "pos", "uri": uri(&track_id), "pos": position_ms})
         }
         P::Stopped { .. } => json!({"ev": "stopped"}),
@@ -664,7 +786,7 @@ async fn writer(mut rx: UnboundedReceiver<Value>) {
     while let Some(v) = rx.recv().await {
         let mut out = stdout.lock();
         if writeln!(out, "{v}").and_then(|_| out.flush()).is_err() {
-            std::process::exit(0);   // SpoTerm closed the pipe
+            std::process::exit(0); // SpoTerm closed the pipe
         }
     }
 }
@@ -690,7 +812,14 @@ mod tests {
         let json = r#"{"cmd":"play_context","uri":"spotify:album:test"}"#;
         let cmd: Cmd = serde_json::from_str(json).unwrap();
         match cmd {
-            Cmd::PlayContext { uri, track_uri, index, position_ms, shuffle, repeat } => {
+            Cmd::PlayContext {
+                uri,
+                track_uri,
+                index,
+                position_ms,
+                shuffle,
+                repeat,
+            } => {
                 assert_eq!(uri, "spotify:album:test");
                 assert_eq!(track_uri, None);
                 assert_eq!(index, None);
@@ -707,7 +836,14 @@ mod tests {
         let json = r#"{"cmd":"play_context","uri":"spotify:album:test","track_uri":"spotify:track:123","index":2,"position_ms":15000,"shuffle":true,"repeat":"context"}"#;
         let cmd: Cmd = serde_json::from_str(json).unwrap();
         match cmd {
-            Cmd::PlayContext { uri, track_uri, index, position_ms, shuffle, repeat } => {
+            Cmd::PlayContext {
+                uri,
+                track_uri,
+                index,
+                position_ms,
+                shuffle,
+                repeat,
+            } => {
                 assert_eq!(uri, "spotify:album:test");
                 assert_eq!(track_uri.as_deref(), Some("spotify:track:123"));
                 assert_eq!(index, Some(2));
@@ -724,7 +860,13 @@ mod tests {
         let min = r#"{"cmd":"play_tracks","uris":["spotify:track:1","spotify:track:2"]}"#;
         let cmd: Cmd = serde_json::from_str(min).unwrap();
         match cmd {
-            Cmd::PlayTracks { uris, start_uri, position_ms, shuffle, repeat } => {
+            Cmd::PlayTracks {
+                uris,
+                start_uri,
+                position_ms,
+                shuffle,
+                repeat,
+            } => {
                 assert_eq!(uris, vec!["spotify:track:1", "spotify:track:2"]);
                 assert_eq!(start_uri, None);
                 assert_eq!(position_ms, 0);
@@ -737,7 +879,13 @@ mod tests {
         let full = r#"{"cmd":"play_tracks","uris":["spotify:track:1"],"start_uri":"spotify:track:1","position_ms":3000,"shuffle":true,"repeat":"track"}"#;
         let cmd_full: Cmd = serde_json::from_str(full).unwrap();
         match cmd_full {
-            Cmd::PlayTracks { uris, start_uri, position_ms, shuffle, repeat } => {
+            Cmd::PlayTracks {
+                uris,
+                start_uri,
+                position_ms,
+                shuffle,
+                repeat,
+            } => {
                 assert_eq!(uris, vec!["spotify:track:1"]);
                 assert_eq!(start_uri.as_deref(), Some("spotify:track:1"));
                 assert_eq!(position_ms, 3000);
@@ -750,14 +898,38 @@ mod tests {
 
     #[test]
     fn cmd_simple_variants() {
-        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"play"}"#).unwrap(), Cmd::Play));
-        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"pause"}"#).unwrap(), Cmd::Pause));
-        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"toggle"}"#).unwrap(), Cmd::Toggle));
-        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"next"}"#).unwrap(), Cmd::Next));
-        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"prev"}"#).unwrap(), Cmd::Prev));
-        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"activate"}"#).unwrap(), Cmd::Activate));
-        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"reconnect"}"#).unwrap(), Cmd::Reconnect));
-        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"quit"}"#).unwrap(), Cmd::Quit));
+        assert!(matches!(
+            serde_json::from_str::<Cmd>(r#"{"cmd":"play"}"#).unwrap(),
+            Cmd::Play
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Cmd>(r#"{"cmd":"pause"}"#).unwrap(),
+            Cmd::Pause
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Cmd>(r#"{"cmd":"toggle"}"#).unwrap(),
+            Cmd::Toggle
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Cmd>(r#"{"cmd":"next"}"#).unwrap(),
+            Cmd::Next
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Cmd>(r#"{"cmd":"prev"}"#).unwrap(),
+            Cmd::Prev
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Cmd>(r#"{"cmd":"activate"}"#).unwrap(),
+            Cmd::Activate
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Cmd>(r#"{"cmd":"reconnect"}"#).unwrap(),
+            Cmd::Reconnect
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Cmd>(r#"{"cmd":"quit"}"#).unwrap(),
+            Cmd::Quit
+        ));
 
         match serde_json::from_str::<Cmd>(r#"{"cmd":"seek","ms":5000}"#).unwrap() {
             Cmd::Seek { ms } => assert_eq!(ms, 5000),
@@ -784,7 +956,13 @@ mod tests {
     fn cmd_api() {
         let def = r#"{"cmd":"api","id":100,"path":"/v1/me"}"#;
         match serde_json::from_str::<Cmd>(def).unwrap() {
-            Cmd::Api { id, method, path, query, body } => {
+            Cmd::Api {
+                id,
+                method,
+                path,
+                query,
+                body,
+            } => {
                 assert_eq!(id, 100);
                 assert_eq!(method, "GET");
                 assert_eq!(path, "/v1/me");
@@ -796,7 +974,13 @@ mod tests {
 
         let full = r#"{"cmd":"api","id":101,"method":"POST","path":"/v1/me/player/next","query":{"dev":"x"},"body":{"ok":true}}"#;
         match serde_json::from_str::<Cmd>(full).unwrap() {
-            Cmd::Api { id, method, path, query, body } => {
+            Cmd::Api {
+                id,
+                method,
+                path,
+                query,
+                body,
+            } => {
                 assert_eq!(id, 101);
                 assert_eq!(method, "POST");
                 assert_eq!(path, "/v1/me/player/next");
@@ -824,9 +1008,13 @@ mod tests {
         assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"volume","pct":"loud"}"#).is_err());
         assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"shuffle","on":"yes"}"#).is_err());
         // extra unknown fields accepted
-        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"play","extra":123}"#).unwrap(), Cmd::Play));
         assert!(matches!(
-            serde_json::from_str::<Cmd>(r#"{"cmd":"seek","ms":100,"extra_field":"ignored"}"#).unwrap(),
+            serde_json::from_str::<Cmd>(r#"{"cmd":"play","extra":123}"#).unwrap(),
+            Cmd::Play
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Cmd>(r#"{"cmd":"seek","ms":100,"extra_field":"ignored"}"#)
+                .unwrap(),
             Cmd::Seek { ms: 100 }
         ));
     }
@@ -847,7 +1035,9 @@ mod tests {
 
     #[test]
     fn test_is_credentials_error() {
-        assert!(is_credentials_error(&anyhow!("INVALID_CREDENTIALS: login failed")));
+        assert!(is_credentials_error(&anyhow!(
+            "INVALID_CREDENTIALS: login failed"
+        )));
         assert!(is_credentials_error(&anyhow!("error: BadCredentials")));
         assert!(is_credentials_error(&anyhow!("Bad credentials provided")));
         assert!(!is_credentials_error(&anyhow!("connection reset")));
@@ -860,7 +1050,12 @@ mod tests {
             use std::sync::atomic::{AtomicU64, Ordering};
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("spoterm-test-{}-{}-{}", prefix, std::process::id(), id));
+            let path = std::env::temp_dir().join(format!(
+                "spoterm-test-{}-{}-{}",
+                prefix,
+                std::process::id(),
+                id
+            ));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -903,7 +1098,9 @@ mod tests {
     #[test]
     fn test_parse_args_from() {
         // run with only --cache
-        let (mode, opts) = parse_args_from(["run".into(), "--cache".into(), "cache_dir".into()].into_iter()).unwrap();
+        let (mode, opts) =
+            parse_args_from(["run".into(), "--cache".into(), "cache_dir".into()].into_iter())
+                .unwrap();
         assert_eq!(mode, "run");
         assert_eq!(opts.cache, PathBuf::from("cache_dir"));
         assert!(opts.player);
@@ -912,45 +1109,138 @@ mod tests {
         assert!(matches!(opts.bitrate, Bitrate::Bitrate160));
 
         // --no-player
-        let (_, opts) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--no-player".into()].into_iter()).unwrap();
+        let (_, opts) = parse_args_from(
+            [
+                "run".into(),
+                "--cache".into(),
+                "c".into(),
+                "--no-player".into(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
         assert!(!opts.player);
 
         // bitrate 96, 320, and anything else maps to 160
-        let (_, opts96) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--bitrate".into(), "96".into()].into_iter()).unwrap();
+        let (_, opts96) = parse_args_from(
+            [
+                "run".into(),
+                "--cache".into(),
+                "c".into(),
+                "--bitrate".into(),
+                "96".into(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
         assert!(matches!(opts96.bitrate, Bitrate::Bitrate96));
 
-        let (_, opts320) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--bitrate".into(), "320".into()].into_iter()).unwrap();
+        let (_, opts320) = parse_args_from(
+            [
+                "run".into(),
+                "--cache".into(),
+                "c".into(),
+                "--bitrate".into(),
+                "320".into(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
         assert!(matches!(opts320.bitrate, Bitrate::Bitrate320));
 
-        let (_, opts160) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--bitrate".into(), "160".into()].into_iter()).unwrap();
+        let (_, opts160) = parse_args_from(
+            [
+                "run".into(),
+                "--cache".into(),
+                "c".into(),
+                "--bitrate".into(),
+                "160".into(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
         assert!(matches!(opts160.bitrate, Bitrate::Bitrate160));
 
-        let (_, opts_other) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--bitrate".into(), "custom".into()].into_iter()).unwrap();
+        let (_, opts_other) = parse_args_from(
+            [
+                "run".into(),
+                "--cache".into(),
+                "c".into(),
+                "--bitrate".into(),
+                "custom".into(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
         assert!(matches!(opts_other.bitrate, Bitrate::Bitrate160));
 
         // --volume clamps to 100 and falls back to 50 on garbage
-        let (_, opts_vol_high) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--volume".into(), "200".into()].into_iter()).unwrap();
+        let (_, opts_vol_high) = parse_args_from(
+            [
+                "run".into(),
+                "--cache".into(),
+                "c".into(),
+                "--volume".into(),
+                "200".into(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
         assert_eq!(opts_vol_high.volume_pct, 100);
 
-        let (_, opts_vol_garbage) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--volume".into(), "xyz".into()].into_iter()).unwrap();
+        let (_, opts_vol_garbage) = parse_args_from(
+            [
+                "run".into(),
+                "--cache".into(),
+                "c".into(),
+                "--volume".into(),
+                "xyz".into(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
         assert_eq!(opts_vol_garbage.volume_pct, 50);
 
         // flag without value is an error
         assert!(parse_args_from(["run".into(), "--cache".into()].into_iter()).is_err());
-        assert!(parse_args_from(["run".into(), "--cache".into(), "c".into(), "--name".into()].into_iter()).is_err());
+        assert!(parse_args_from(
+            ["run".into(), "--cache".into(), "c".into(), "--name".into()].into_iter()
+        )
+        .is_err());
 
         // unknown flag is an error
-        assert!(parse_args_from(["run".into(), "--cache".into(), "c".into(), "--unknown-flag".into()].into_iter()).is_err());
+        assert!(parse_args_from(
+            [
+                "run".into(),
+                "--cache".into(),
+                "c".into(),
+                "--unknown-flag".into()
+            ]
+            .into_iter()
+        )
+        .is_err());
 
         // weblogin requires --client-id and --token
         assert!(parse_args_from(["weblogin".into()].into_iter()).is_err());
-        assert!(parse_args_from(["weblogin".into(), "--client-id".into(), "cid".into()].into_iter()).is_err());
-        assert!(parse_args_from(["weblogin".into(), "--token".into(), "tok".into()].into_iter()).is_err());
-        let (web_mode, web_opts) = parse_args_from([
-            "weblogin".into(),
-            "--client-id".into(), "cid".into(),
-            "--token".into(), "tok".into(),
-        ].into_iter()).unwrap();
+        assert!(parse_args_from(
+            ["weblogin".into(), "--client-id".into(), "cid".into()].into_iter()
+        )
+        .is_err());
+        assert!(
+            parse_args_from(["weblogin".into(), "--token".into(), "tok".into()].into_iter())
+                .is_err()
+        );
+        let (web_mode, web_opts) = parse_args_from(
+            [
+                "weblogin".into(),
+                "--client-id".into(),
+                "cid".into(),
+                "--token".into(),
+                "tok".into(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
         assert_eq!(web_mode, "weblogin");
         assert_eq!(web_opts.client_id, "cid");
         assert_eq!(web_opts.token, PathBuf::from("tok"));

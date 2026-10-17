@@ -29,10 +29,10 @@ pub struct Engine {
     events: Receiver<(u32, Value)>,
     sender: Sender<(u32, Value)>,
     gen: u32,
-    pub ready: bool,           // the player is connected
-    pub alive: bool,           // the engine said hello: API calls can flow
+    pub ready: bool, // the player is connected
+    pub alive: bool, // the engine said hello: API calls can flow
     pub device_id: Option<String>,
-    pub state: &'static str,   // "", "login", "retrying"
+    pub state: &'static str, // "", "login", "retrying"
     pub error: String,
     next_id: u64,
     login_pid: std::cell::Cell<u32>,
@@ -45,8 +45,21 @@ fn post(hwnd: isize, msg: u32, w: usize, l: isize) {
 impl Engine {
     pub fn new(bin: PathBuf) -> Engine {
         let (sender, events) = channel();
-        Engine { bin, child: None, stdin: None, events, sender, gen: 0, ready: false, alive: false,
-                 device_id: None, state: "", error: String::new(), next_id: 0, login_pid: Default::default() }
+        Engine {
+            bin,
+            child: None,
+            stdin: None,
+            events,
+            sender,
+            gen: 0,
+            ready: false,
+            alive: false,
+            device_id: None,
+            state: "",
+            error: String::new(),
+            next_id: 0,
+            login_pid: Default::default(),
+        }
     }
 
     pub fn cache_dir() -> PathBuf {
@@ -62,7 +75,9 @@ impl Engine {
     }
 
     pub fn running(&mut self) -> bool {
-        self.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+        self.child
+            .as_mut()
+            .is_some_and(|c| matches!(c.try_wait(), Ok(None)))
     }
 
     fn command(&self, s: &Settings) -> Command {
@@ -87,15 +102,28 @@ impl Engine {
         self.stop();
         let cache = Self::cache_dir();
         let _ = std::fs::create_dir_all(&cache);
-        let log = std::fs::File::create(Self::log_path()).map_err(|e| format!("engine.log: {e}"))?;
+        let log =
+            std::fs::File::create(Self::log_path()).map_err(|e| format!("engine.log: {e}"))?;
         let mut cmd = self.command(s);
-        cmd.arg("run").arg("--cache").arg(&cache).arg("--name").arg(&s.device_name)
-            .arg("--bitrate").arg(s.bitrate.to_string()).arg("--client-id").arg(&s.client_id)
-            .arg("--token").arg(&s.token_path);
+        cmd.arg("run")
+            .arg("--cache")
+            .arg(&cache)
+            .arg("--name")
+            .arg(&s.device_name)
+            .arg("--bitrate")
+            .arg(s.bitrate.to_string())
+            .arg("--client-id")
+            .arg(&s.client_id)
+            .arg("--token")
+            .arg(&s.token_path);
         if !s.engine || !Self::player_signed_in() {
             cmd.arg("--no-player");
         }
-        let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log).spawn()
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(log)
+            .spawn()
             .map_err(|e| format!("couldn't start {}: {e}", self.bin.display()))?;
         self.gen += 1;
         let gen = self.gen;
@@ -138,11 +166,30 @@ impl Engine {
             let dev = ev["device_id"].as_str().map(str::to_string);
             match ev["ev"].as_str().unwrap_or("") {
                 "hello" => self.alive = true,
-                "ready" => { self.ready = true; self.device_id = dev; self.state = ""; self.error.clear(); }
-                "reconnecting" => { self.ready = false; self.state = "retrying"; }
-                "reconnected" => { self.ready = true; self.state = ""; self.error.clear(); if dev.is_some() { self.device_id = dev; } }
+                "ready" => {
+                    self.ready = true;
+                    self.device_id = dev;
+                    self.state = "";
+                    self.error.clear();
+                }
+                "reconnecting" => {
+                    self.ready = false;
+                    self.state = "retrying";
+                }
+                "reconnected" => {
+                    self.ready = true;
+                    self.state = "";
+                    self.error.clear();
+                    if dev.is_some() {
+                        self.device_id = dev;
+                    }
+                }
                 "player" => {
-                    self.state = match ev["state"].as_str() { Some("login") => "login", Some("retrying") => "retrying", _ => "" };
+                    self.state = match ev["state"].as_str() {
+                        Some("login") => "login",
+                        Some("retrying") => "retrying",
+                        _ => "",
+                    };
                     self.error = ev["msg"].as_str().unwrap_or("").to_string();
                 }
                 "exit" => {
@@ -161,10 +208,15 @@ impl Engine {
     }
 
     fn write(&mut self, v: &Value) -> bool {
-        let Some(stdin) = self.stdin.as_mut() else { return false };
+        let Some(stdin) = self.stdin.as_mut() else {
+            return false;
+        };
         let mut line = v.to_string();
         line.push('\n');
-        stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).is_ok()
+        stdin
+            .write_all(line.as_bytes())
+            .and_then(|_| stdin.flush())
+            .is_ok()
     }
 
     /// A player command; only sent while the player is connected.
@@ -177,11 +229,21 @@ impl Engine {
     }
 
     /// Start a Web API call; the answer arrives later as an `api` event with this id.
-    pub fn api(&mut self, method: &str, path: &str, query: Value, body: Option<Value>) -> Option<u64> {
+    pub fn api(
+        &mut self,
+        method: &str,
+        path: &str,
+        query: Value,
+        body: Option<Value>,
+    ) -> Option<u64> {
         self.stdin.as_ref()?;
         self.next_id += 1;
         let id = self.next_id;
-        let q = if query.as_object().is_some_and(|o| !o.is_empty()) { query } else { Value::Null };
+        let q = if query.as_object().is_some_and(|o| !o.is_empty()) {
+            query
+        } else {
+            Value::Null
+        };
         self.write(&json!({"cmd": "api", "id": id, "method": method, "path": path, "query": q, "body": body}))
             .then_some(id)
     }
@@ -214,8 +276,13 @@ impl Engine {
             let _ = std::fs::create_dir_all(&cache);
             cmd.arg("login").arg("--cache").arg(cache);
         } else {
-            cmd.arg("weblogin").arg("--client-id").arg(&s.client_id).arg("--token").arg(&s.token_path)
-                .arg("--redirect").arg(&s.redirect_uri);
+            cmd.arg("weblogin")
+                .arg("--client-id")
+                .arg(&s.client_id)
+                .arg("--token")
+                .arg(&s.token_path)
+                .arg("--redirect")
+                .arg(&s.redirect_uri);
         }
         cmd.stdin(Stdio::null()).stdout(Stdio::null());
         if let Ok(f) = std::fs::File::create(config_dir().join("login.log")) {
@@ -239,7 +306,9 @@ impl Engine {
     /// Stop a sign-in still waiting for the browser (it would hold its port forever).
     pub fn cancel_sign_in(&self) {
         use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
         let pid = self.login_pid.replace(0);
         if pid != 0 {
             unsafe {

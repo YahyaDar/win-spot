@@ -39,7 +39,10 @@ fn bearer() -> String {
 }
 
 fn now() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 pub struct Web {
@@ -60,7 +63,12 @@ pub struct Failure {
 
 impl Failure {
     fn net(msg: impl Into<String>) -> Self {
-        Failure { status: 0, msg: msg.into(), body: Value::Null, retry_after: 0 }
+        Failure {
+            status: 0,
+            msg: msg.into(),
+            body: Value::Null,
+            retry_after: 0,
+        }
     }
 }
 
@@ -73,7 +81,12 @@ impl Web {
             .pool_max_idle_per_host(2)
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        Ok(Web { http, client_id, path, token: Mutex::new(None) })
+        Ok(Web {
+            http,
+            client_id,
+            path,
+            token: Mutex::new(None),
+        })
     }
 
     /// A valid access token, refreshing it first when it's about to expire or was rejected.
@@ -108,7 +121,13 @@ impl Web {
             ("refresh_token", tok.refresh_token.as_str()),
             ("client_id", self.client_id.as_str()),
         ];
-        let resp = self.http.post(TOKEN_URL).form(&form).send().await.map_err(net_failure)?;
+        let resp = self
+            .http
+            .post(TOKEN_URL)
+            .form(&form)
+            .send()
+            .await
+            .map_err(net_failure)?;
         let status = resp.status().as_u16();
         let body = read_json(resp).await?;
         if status != 200 {
@@ -116,18 +135,32 @@ impl Web {
             return Err(if status == 400 || status == 401 {
                 login_needed("sign-in expired")
             } else {
-                Failure { status, msg: format!("token refresh failed ({status})"), body, retry_after: 0 }
+                Failure {
+                    status,
+                    msg: format!("token refresh failed ({status})"),
+                    body,
+                    retry_after: 0,
+                }
             });
         }
-        let access = body["access_token"].as_str().unwrap_or_default().to_string();
+        let access = body["access_token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         if access.is_empty() {
             return Err(Failure::net("token refresh returned no token"));
         }
         Ok(Token {
             access_token: access,
-            refresh_token: body["refresh_token"].as_str().map(str::to_string).unwrap_or_else(|| tok.refresh_token.clone()),
+            refresh_token: body["refresh_token"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| tok.refresh_token.clone()),
             expires_at: now() + body["expires_in"].as_f64().unwrap_or(3600.0),
-            scope: body["scope"].as_str().map(str::to_string).unwrap_or_else(|| tok.scope.clone()),
+            scope: body["scope"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| tok.scope.clone()),
             pkce: tok.pkce,
             token_type: "Bearer".into(),
         })
@@ -170,20 +203,32 @@ impl Web {
         } else {
             format!("{API}v1/{}", path.trim_start_matches('/'))
         };
-        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| Failure::net("bad method"))?;
+        let method = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|_| Failure::net("bad method"))?;
         let idempotent = method != reqwest::Method::POST;
         let query: Vec<(String, String)> = query
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, v)| !v.is_null())
-            .map(|(k, v)| (k, v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())))
+            .map(|(k, v)| {
+                (
+                    k,
+                    v.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| v.to_string()),
+                )
+            })
             .collect();
 
         let mut rejected: Option<String> = None;
         let mut retried = false;
         loop {
             let token = self.access(rejected.as_deref()).await?;
-            let mut req = self.http.request(method.clone(), &url).bearer_auth(&token).query(&query);
+            let mut req = self
+                .http
+                .request(method.clone(), &url)
+                .bearer_auth(&token)
+                .query(&query);
             req = match &body {
                 Some(b) => req
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -209,7 +254,9 @@ impl Web {
                 continue;
             }
             let retry_after = parse_retry_after(
-                resp.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()),
+                resp.headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
             );
             if status == 429 && retry_after <= MAX_WAIT_429 && !retried {
                 retried = true;
@@ -228,7 +275,12 @@ impl Web {
 }
 
 fn login_needed(msg: &str) -> Failure {
-    Failure { status: 401, msg: msg.into(), body: json!({"login": true}), retry_after: 0 }
+    Failure {
+        status: 401,
+        msg: msg.into(),
+        body: json!({"login": true}),
+        retry_after: 0,
+    }
 }
 
 fn net_failure(e: reqwest::Error) -> Failure {
@@ -286,7 +338,12 @@ fn classify(status: u16, retry_after: u64, body: &[u8]) -> Result<(u16, Value), 
             .or_else(|| value["error"].as_str())
             .unwrap_or("request failed")
             .to_string();
-        return Err(Failure { status, msg, body: value, retry_after });
+        return Err(Failure {
+            status,
+            msg,
+            body: value,
+            retry_after,
+        });
     }
     Ok((status, value))
 }
@@ -330,14 +387,20 @@ mod tests {
 
     #[test]
     fn classify_400_with_error_object() {
-        let err = classify(400, 0, b"{\"error\":{\"status\":400,\"message\":\"bad\"}}").unwrap_err();
+        let err =
+            classify(400, 0, b"{\"error\":{\"status\":400,\"message\":\"bad\"}}").unwrap_err();
         assert_eq!(err.status, 400);
         assert_eq!(err.msg, "bad");
     }
 
     #[test]
     fn classify_401_with_error_description() {
-        let err = classify(401, 0, b"{\"error\":\"invalid_grant\",\"error_description\":\"gone\"}").unwrap_err();
+        let err = classify(
+            401,
+            0,
+            b"{\"error\":\"invalid_grant\",\"error_description\":\"gone\"}",
+        )
+        .unwrap_err();
         assert_eq!(err.status, 401);
         assert_eq!(err.msg, "gone");
     }

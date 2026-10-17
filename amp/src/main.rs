@@ -26,7 +26,10 @@ use windows_sys::Win32::System::DataExchange::{CloseClipboard, GetClipboardData,
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows_sys::Win32::System::Threading::CreateMutexW;
-use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI};
+use windows_sys::Win32::UI::HiDpi::{
+    GetDpiForMonitor, GetDpiForSystem, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -145,7 +148,14 @@ fn main() {
     };
 
     let ui = config::load_state();
-    let at = if ui.x == i32::MIN { POINT { x: 0, y: 0 } } else { POINT { x: ui.x + 10, y: ui.y + 10 } };
+    let at = if ui.x == i32::MIN {
+        POINT { x: 0, y: 0 }
+    } else {
+        POINT {
+            x: ui.x + 10,
+            y: ui.y + 10,
+        }
+    };
     let auto = auto_pct(monitor_dpi(at));
     let pct = if ui.scale > 0 { ui.scale } else { auto };
     let a = Box::new(App::new(s, ui, skin, Engine::new(bin), pct, auto));
@@ -176,8 +186,16 @@ fn main() {
 
 fn message(text: &str, error: bool) {
     unsafe {
-        MessageBoxW(null_mut(), wide_z(text).as_ptr(), wide_z("SpoTermAmp").as_ptr(),
-                    if error { MB_ICONERROR } else { MB_ICONINFORMATION } | MB_OK);
+        MessageBoxW(
+            null_mut(),
+            wide_z(text).as_ptr(),
+            wide_z("SpoTermAmp").as_ptr(),
+            if error {
+                MB_ICONERROR
+            } else {
+                MB_ICONINFORMATION
+            } | MB_OK,
+        );
     }
 }
 
@@ -187,7 +205,8 @@ fn create_windows() -> bool {
     unsafe {
         let hinst = GetModuleHandleW(null());
         let icon = make_icon(a);
-        let procs: [(&str, WNDPROC); 2] = [(MAIN_CLASS, Some(main_proc)), (PL_CLASS, Some(pl_proc))];
+        let procs: [(&str, WNDPROC); 2] =
+            [(MAIN_CLASS, Some(main_proc)), (PL_CLASS, Some(pl_proc))];
         for (name, proc_) in procs {
             let cls = wide_z(name);
             let wc = WNDCLASSEXW {
@@ -210,18 +229,45 @@ fn create_windows() -> bool {
             y = (GetSystemMetrics(SM_CYSCREEN) - phys(main_h(a) + a.ui.pl_h, pct)) / 3;
         }
         let ex = if a.ui.on_top { WS_EX_TOPMOST } else { 0 } | WS_EX_APPWINDOW;
-        let hmain = CreateWindowExW(ex, wide_z(MAIN_CLASS).as_ptr(), wide_z("SpoTermAmp").as_ptr(),
-                                    WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX, x, y, phys(MAIN_W, pct), phys(main_h(a), pct),
-                                    null_mut(), null_mut(), hinst, null());
+        let hmain = CreateWindowExW(
+            ex,
+            wide_z(MAIN_CLASS).as_ptr(),
+            wide_z("SpoTermAmp").as_ptr(),
+            WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX,
+            x,
+            y,
+            phys(MAIN_W, pct),
+            phys(main_h(a), pct),
+            null_mut(),
+            null_mut(),
+            hinst,
+            null(),
+        );
         if hmain.is_null() {
             return false;
         }
         a.hmain = hmain;
         apply_region(a);
-        let (px, py) = if a.ui.docked || !on_screen(a.ui.pl_x, a.ui.pl_y) { (x, y + phys(main_h(a), pct)) } else { (a.ui.pl_x, a.ui.pl_y) };
+        let (px, py) = if a.ui.docked || !on_screen(a.ui.pl_x, a.ui.pl_y) {
+            (x, y + phys(main_h(a), pct))
+        } else {
+            (a.ui.pl_x, a.ui.pl_y)
+        };
         // Owned by the main window: no taskbar button of its own, minimised with it.
-        let hpl = CreateWindowExW(if a.ui.on_top { WS_EX_TOPMOST } else { 0 }, wide_z(PL_CLASS).as_ptr(), wide_z("SpoTermAmp Playlist").as_ptr(),
-                                  WS_POPUP, px, py, phys(a.ui.pl_w, pct), phys(a.ui.pl_h, pct), hmain, null_mut(), hinst, null());
+        let hpl = CreateWindowExW(
+            if a.ui.on_top { WS_EX_TOPMOST } else { 0 },
+            wide_z(PL_CLASS).as_ptr(),
+            wide_z("SpoTermAmp Playlist").as_ptr(),
+            WS_POPUP,
+            px,
+            py,
+            phys(a.ui.pl_w, pct),
+            phys(a.ui.pl_h, pct),
+            hmain,
+            null_mut(),
+            hinst,
+            null(),
+        );
         a.hpl = hpl;
         ShowWindow(hmain, SW_SHOW);
         if a.ui.pl_open && !hpl.is_null() {
@@ -234,15 +280,23 @@ fn create_windows() -> bool {
 
 fn on_screen(x: i32, y: i32) -> bool {
     unsafe {
-        let (vx, vy) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
-        let (vw, vh) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+        let (vx, vy) = (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+        );
+        let (vw, vh) = (
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        );
         x >= vx - 100 && y >= vy - 10 && x < vx + vw - 50 && y < vy + vh - 30
     }
 }
 
 /// The window icon, cut from the skin (the logo in the bottom-right corner of main.bmp).
 fn make_icon(a: &App) -> HICON {
-    let Some(m) = a.skin.main.as_ref() else { return null_mut() };
+    let Some(m) = a.skin.main.as_ref() else {
+        return null_mut();
+    };
     let (sx, sy) = (250, 89);
     let mut px = vec![0u32; 32 * 32];
     for y in 0..32 {
@@ -253,7 +307,13 @@ fn make_icon(a: &App) -> HICON {
     unsafe {
         let color = CreateBitmap(32, 32, 1, 32, px.as_ptr() as _);
         let mask = CreateBitmap(32, 32, 1, 1, vec![0u8; 32 * 4].as_ptr() as _);
-        let info = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+        let info = ICONINFO {
+            fIcon: 1,
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask,
+            hbmColor: color,
+        };
         let icon = CreateIconIndirect(&info);
         DeleteObject(color);
         DeleteObject(mask);
@@ -272,7 +332,10 @@ fn apply_region(a: &App) {
     let mut counts = Vec::new();
     for poly in &a.skin.region {
         counts.push(poly.len() as i32);
-        pts.extend(poly.iter().map(|&(x, y)| POINT { x: phys(x, pct), y: phys(y, pct) }));
+        pts.extend(poly.iter().map(|&(x, y)| POINT {
+            x: phys(x, pct),
+            y: phys(y, pct),
+        }));
     }
     unsafe {
         let rgn = CreatePolyPolygonRgn(pts.as_ptr(), counts.as_ptr(), counts.len() as i32, WINDING);
@@ -319,7 +382,15 @@ pub fn toggle_playlist(a: &mut App) {
         if a.ui.pl_open {
             if a.ui.docked {
                 let (x, y) = dock_pos(a);
-                SetWindowPos(a.hpl, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                SetWindowPos(
+                    a.hpl,
+                    null_mut(),
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
             }
             ShowWindow(a.hpl, SW_SHOWNOACTIVATE);
         } else {
@@ -338,7 +409,8 @@ fn monitor_dpi(pt: POINT) -> u32 {
     unsafe {
         let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         let (mut x, mut y) = (0u32, 0u32);
-        if !mon.is_null() && GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut x, &mut y) == 0 && x > 0 {
+        if !mon.is_null() && GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut x, &mut y) == 0 && x > 0
+        {
             x
         } else {
             GetDpiForSystem()
@@ -348,8 +420,16 @@ fn monitor_dpi(pt: POINT) -> u32 {
 
 /// The size the user picked: a percentage, or 0 to follow the screen.
 fn choose_zoom(a: &mut App, choice: i32) {
-    a.ui.scale = if choice == 0 { 0 } else { choice.clamp(MIN_PCT, MAX_PCT) };
-    let pct = if a.ui.scale == 0 { a.auto_pct } else { a.ui.scale };
+    a.ui.scale = if choice == 0 {
+        0
+    } else {
+        choice.clamp(MIN_PCT, MAX_PCT)
+    };
+    let pct = if a.ui.scale == 0 {
+        a.auto_pct
+    } else {
+        a.ui.scale
+    };
     set_pct(a, pct);
     a.flash(format!("Size: {pct}%"), false);
 }
@@ -383,7 +463,15 @@ fn set_pct(a: &mut App, pct: i32) {
     a.pct = pct;
     a.set_fonts();
     unsafe {
-        SetWindowPos(a.hmain, null_mut(), 0, 0, phys(MAIN_W, pct), phys(main_h(a), pct), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(
+            a.hmain,
+            null_mut(),
+            0,
+            0,
+            phys(MAIN_W, pct),
+            phys(main_h(a), pct),
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
         apply_region(a);
         if !a.hpl.is_null() {
             let (w, h) = (phys(a.ui.pl_w, pct), phys(a.ui.pl_h, pct));
@@ -391,7 +479,15 @@ fn set_pct(a: &mut App, pct: i32) {
                 let (x, y) = dock_pos(a);
                 SetWindowPos(a.hpl, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
             } else {
-                SetWindowPos(a.hpl, null_mut(), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                SetWindowPos(
+                    a.hpl,
+                    null_mut(),
+                    0,
+                    0,
+                    w,
+                    h,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
             }
         }
     }
@@ -402,12 +498,30 @@ fn set_pct(a: &mut App, pct: i32) {
 fn toggle_shade(a: &mut App) {
     a.ui.shade = !a.ui.shade;
     unsafe {
-        SetWindowPos(a.hmain, null_mut(), 0, 0, phys(MAIN_W, a.pct), phys(main_h(a), a.pct), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(
+            a.hmain,
+            null_mut(),
+            0,
+            0,
+            phys(MAIN_W, a.pct),
+            phys(main_h(a), a.pct),
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
     apply_region(a);
     if a.ui.docked && a.ui.pl_open && !a.hpl.is_null() {
         let (x, y) = dock_pos(a);
-        unsafe { SetWindowPos(a.hpl, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+        unsafe {
+            SetWindowPos(
+                a.hpl,
+                null_mut(),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        };
     }
     a.inv_main();
 }
@@ -416,9 +530,25 @@ fn set_on_top(a: &mut App, on: bool) {
     a.ui.on_top = on;
     let after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
     unsafe {
-        SetWindowPos(a.hmain, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowPos(
+            a.hmain,
+            after,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
         if !a.hpl.is_null() {
-            SetWindowPos(a.hpl, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetWindowPos(
+                a.hpl,
+                after,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
         }
     }
     a.inv_main();
@@ -447,7 +577,10 @@ fn mouse(lp: LPARAM, pct: i32) -> (i32, i32) {
 }
 
 fn screen_point(lp: LPARAM) -> POINT {
-    POINT { x: (lp & 0xFFFF) as i16 as i32, y: ((lp >> 16) & 0xFFFF) as i16 as i32 }
+    POINT {
+        x: (lp & 0xFFFF) as i16 as i32,
+        y: ((lp >> 16) & 0xFFFF) as i16 as i32,
+    }
 }
 
 fn screen_to_logical(h: HWND, lp: LPARAM, pct: i32) -> (i32, i32) {
@@ -521,7 +654,9 @@ fn paint(h: HWND, main: bool) {
 
 // ── Main window ──────────────────────────────────────────────────────────────
 unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    let Some(a) = app() else { return DefWindowProcW(h, msg, wp, lp) };
+    let Some(a) = app() else {
+        return DefWindowProcW(h, msg, wp, lp);
+    };
     if a.hmain.is_null() {
         return DefWindowProcW(h, msg, wp, lp);
     }
@@ -548,7 +683,11 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
         }
         WM_NCHITTEST => {
             let (x, y) = screen_to_logical(h, lp, a.pct);
-            return if matches!(main_hit(a, x, y), Hit::Drag) { HTCAPTION as LRESULT } else { HTCLIENT as LRESULT };
+            return if matches!(main_hit(a, x, y), Hit::Drag) {
+                HTCAPTION as LRESULT
+            } else {
+                HTCLIENT as LRESULT
+            };
         }
         WM_DPICHANGED => {
             // Moved to a monitor with another DPI: keep the place Windows suggests and, when
@@ -556,7 +695,15 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             let dpi = (wp & 0xFFFF) as u32;
             a.auto_pct = auto_pct(dpi);
             let r = &*(lp as *const RECT);
-            SetWindowPos(h, null_mut(), r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowPos(
+                h,
+                null_mut(),
+                r.left,
+                r.top,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
             if a.ui.scale == 0 {
                 set_pct(a, a.auto_pct);
             }
@@ -577,7 +724,15 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
         WM_MOVE => {
             if a.ui.docked && a.ui.pl_open && !a.hpl.is_null() {
                 let (x, y) = dock_pos(a);
-                SetWindowPos(a.hpl, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                SetWindowPos(
+                    a.hpl,
+                    null_mut(),
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
             }
         }
         WM_SIZE => {
@@ -596,7 +751,11 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
                 Hit::Volume => {
                     // Grabbing the thumb keeps it under the pointer; elsewhere it jumps there.
                     let tx = vol_thumb_x(a);
-                    a.grab = if (tx..tx + 14).contains(&x) { x - tx } else { 7 };
+                    a.grab = if (tx..tx + 14).contains(&x) {
+                        x - tx
+                    } else {
+                        7
+                    };
                     a.hold = Hold::Volume;
                     let v = volume_at(x - a.grab + 7);
                     if a.volume() != Some(v) {
@@ -604,7 +763,11 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
                     }
                 }
                 Hit::Seek => {
-                    if let Some(d) = a.pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.duration_ms) {
+                    if let Some(d) =
+                        a.pb.as_ref()
+                            .and_then(|p| p.track.as_ref())
+                            .map(|t| t.duration_ms)
+                    {
                         a.grab = match seek_thumb_x(a) {
                             _ if a.ui.shade => 1,
                             Some(tx) if (tx..tx + 29).contains(&x) => x - tx,
@@ -641,7 +804,11 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
                     }
                 }
                 Hold::Seek(old) => {
-                    if let Some(d) = a.pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.duration_ms) {
+                    if let Some(d) =
+                        a.pb.as_ref()
+                            .and_then(|p| p.track.as_ref())
+                            .map(|t| t.duration_ms)
+                    {
                         let at = if a.ui.shade { x } else { x - a.grab + 14 };
                         let pos = seek_at(a, at, d);
                         if pos != old {
@@ -659,7 +826,9 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             let hold = std::mem::replace(&mut a.hold, Hold::None);
             ReleaseCapture();
             match hold {
-                Hold::Button(id) if matches!(main_hit(a, x, y), Hit::Button(b) if b == id) => main_button(id),
+                Hold::Button(id) if matches!(main_hit(a, x, y), Hit::Button(b) if b == id) => {
+                    main_button(id)
+                }
                 Hold::Seek(pos) => a.seek_to(pos),
                 _ => {}
             }
@@ -753,7 +922,9 @@ fn main_button(id: u32) {
 
 // ── Playlist window ──────────────────────────────────────────────────────────
 unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    let Some(a) = app() else { return DefWindowProcW(h, msg, wp, lp) };
+    let Some(a) = app() else {
+        return DefWindowProcW(h, msg, wp, lp);
+    };
     if a.hpl.is_null() {
         return DefWindowProcW(h, msg, wp, lp);
     }
@@ -780,14 +951,25 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_GETMINMAXINFO => {
             let mm = &mut *(lp as *mut MINMAXINFO);
-            mm.ptMinTrackSize = POINT { x: phys(275, pct), y: phys(116, pct) };
+            mm.ptMinTrackSize = POINT {
+                x: phys(275, pct),
+                y: phys(116, pct),
+            };
             return 0;
         }
         WM_SIZING => {
             // Playlists grow in steps of 25x29, the size of the skin's tiles.
             let r = &mut *(lp as *mut RECT);
-            let w = (logical(r.right - r.left, pct) - 275 + 12).div_euclid(25).max(0) * 25 + 275;
-            let hgt = (logical(r.bottom - r.top, pct) - 116 + 14).div_euclid(29).max(0) * 29 + 116;
+            let w = (logical(r.right - r.left, pct) - 275 + 12)
+                .div_euclid(25)
+                .max(0)
+                * 25
+                + 275;
+            let hgt = (logical(r.bottom - r.top, pct) - 116 + 14)
+                .div_euclid(29)
+                .max(0)
+                * 29
+                + 116;
             r.right = r.left + phys(w, pct);
             r.bottom = r.top + phys(hgt, pct);
             return 1;
@@ -810,7 +992,12 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let snap = phys(10, pct);
             if (r.left - dx).abs() < snap && (r.top - dy).abs() < snap {
                 let (w, hgt) = (r.right - r.left, r.bottom - r.top);
-                *r = RECT { left: dx, top: dy, right: dx + w, bottom: dy + hgt };
+                *r = RECT {
+                    left: dx,
+                    top: dy,
+                    right: dx + w,
+                    bottom: dy + hgt,
+                };
             }
             return 1;
         }
@@ -880,7 +1067,8 @@ unsafe extern "system" fn pl_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let l = a.cur_list_mut();
                 let max_top = l.tracks.len().saturating_sub(rows);
                 if travel > 0 {
-                    l.top = ((y - grab - 20).clamp(0, travel) as i64 * max_top as i64 / travel as i64) as usize;
+                    l.top = ((y - grab - 20).clamp(0, travel) as i64 * max_top as i64
+                        / travel as i64) as usize;
                 }
                 a.prefetch();
                 a.inv_pl();
@@ -944,9 +1132,18 @@ fn pl_button(id: u32) {
         P_LIST | P_EJECT => library_menu(),
         P_ADD => {
             let cmd = popup(|a, m| {
-                let has = a.pb.as_ref().and_then(|p| p.track.as_ref()).is_some_and(|t| t.is_track());
+                let has =
+                    a.pb.as_ref()
+                        .and_then(|p| p.track.as_ref())
+                        .is_some_and(|t| t.is_track());
                 add(m, M_SEARCH, "&Search Spotify...\tJ", false, true);
-                add(m, M_LIKE, "&Add the playing song to Liked Songs\tF", false, has && a.liked == Some(false));
+                add(
+                    m,
+                    M_LIKE,
+                    "&Add the playing song to Liked Songs\tF",
+                    false,
+                    has && a.liked == Some(false),
+                );
                 sep(m);
                 library_items(a, m);
             });
@@ -955,14 +1152,32 @@ fn pl_button(id: u32) {
         P_REM => {
             let cmd = popup(|a, m| {
                 let sel = a.cur == "liked" && a.selected().is_some();
-                add(m, M_UNLIKE_SEL, "Remove the &selected song from Liked Songs", false, sel);
-                add(m, M_LIKE, "Remove the &playing song from Liked Songs\tF", false, a.liked == Some(true));
+                add(
+                    m,
+                    M_UNLIKE_SEL,
+                    "Remove the &selected song from Liked Songs",
+                    false,
+                    sel,
+                );
+                add(
+                    m,
+                    M_LIKE,
+                    "Remove the &playing song from Liked Songs\tF",
+                    false,
+                    a.liked == Some(true),
+                );
             });
             run_command(cmd);
         }
         P_SEL => {
             let cmd = popup(|a, m| {
-                add(m, M_JUMP, "&Jump to the playing song", false, a.pb.as_ref().is_some_and(|p| p.track.is_some()));
+                add(
+                    m,
+                    M_JUMP,
+                    "&Jump to the playing song",
+                    false,
+                    a.pb.as_ref().is_some_and(|p| p.track.is_some()),
+                );
                 add(m, M_FIRST, "&First song\tHome", false, true);
                 add(m, M_LAST, "&Last song\tEnd", false, true);
             });
@@ -1010,7 +1225,11 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
             }
             _ if ctrl && vk == b'V' as u16 => {
                 if let Some(t) = clipboard_text() {
-                    spotify::append_capped(&mut a.query, &spotify::clean(&t), spotify::MAX_QUERY_CHARS);
+                    spotify::append_capped(
+                        &mut a.query,
+                        &spotify::clean(&t),
+                        spotify::MAX_QUERY_CHARS,
+                    );
                     a.inv_pl();
                 }
             }
@@ -1036,17 +1255,17 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
         _ if ctrl && vk == b'W' as u16 => toggle_shade(a),
         _ if ctrl && vk == b'F' as u16 => a.start_search(),
         _ if ctrl => return false,
-        0x5A => a.skip(false),           // Z
-        0x58 => a.play(),                // X
+        0x5A => a.skip(false),              // Z
+        0x58 => a.play(),                   // X
         0x43 | VK_SPACE => a.toggle_play(), // C (Winamp's pause), space
-        0x56 => a.stop(),                // V
-        0x42 => a.skip(true),            // B
-        0x53 => a.toggle_shuffle(),      // S
-        0x52 => a.cycle_repeat(),        // R
-        0x46 => a.toggle_like(),         // F
-        0x44 => a.fetch_devices(),       // D
-        0x4C => library_menu(),          // L
-        0x4A => a.start_search(),        // J (Winamp's jump to file)
+        0x56 => a.stop(),                   // V
+        0x42 => a.skip(true),               // B
+        0x53 => a.toggle_shuffle(),         // S
+        0x52 => a.cycle_repeat(),           // R
+        0x46 => a.toggle_like(),            // F
+        0x44 => a.fetch_devices(),          // D
+        0x4C => library_menu(),             // L
+        0x4A => a.start_search(),           // J (Winamp's jump to file)
         VK_F5 => a.reload(),
         VK_LEFT => a.seek_by(-app::SEEK_STEP_MS),
         VK_RIGHT => a.seek_by(app::SEEK_STEP_MS),
@@ -1103,7 +1322,10 @@ fn clipboard_text() -> Option<String> {
                 while n < 4096 && *p.add(n) != 0 {
                     n += 1;
                 }
-                out = Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, n)).replace(['\r', '\n'], " "));
+                out = Some(
+                    String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+                        .replace(['\r', '\n'], " "),
+                );
                 GlobalUnlock(h);
             }
         }
@@ -1114,7 +1336,8 @@ fn clipboard_text() -> Option<String> {
 
 // ── Menus ────────────────────────────────────────────────────────────────────
 fn add(m: HMENU, id: usize, text: &str, checked: bool, enabled: bool) {
-    let flags = MF_STRING | if checked { MF_CHECKED } else { 0 } | if enabled { 0 } else { MF_GRAYED };
+    let flags =
+        MF_STRING | if checked { MF_CHECKED } else { 0 } | if enabled { 0 } else { MF_GRAYED };
     unsafe { AppendMenuW(m, flags, id, wide_z(text).as_ptr()) };
 }
 
@@ -1127,11 +1350,27 @@ fn library_items(a: &App, m: HMENU) {
     add(m, M_SEARCH, "&Search...\tJ, /", a.cur == "search", true);
     sep(m);
     if a.playlists.is_empty() {
-        add(m, 0, if a.playlists_loaded { "No playlists" } else { "Loading playlists..." }, false, false);
+        add(
+            m,
+            0,
+            if a.playlists_loaded {
+                "No playlists"
+            } else {
+                "Loading playlists..."
+            },
+            false,
+            false,
+        );
     }
     for (i, p) in a.playlists.iter().enumerate().take(900) {
         let name = p.name.replace('&', "&&");
-        add(m, M_PLAYLIST + i, &name, a.cur == format!("pl:{}", p.id), true);
+        add(
+            m,
+            M_PLAYLIST + i,
+            &name,
+            a.cur == format!("pl:{}", p.id),
+            true,
+        );
     }
     sep(m);
     add(m, M_RELOAD, "&Reload\tF5", false, true);
@@ -1148,7 +1387,15 @@ fn popup(build: impl FnOnce(&App, HMENU)) -> usize {
         let mut pt = POINT { x: 0, y: 0 };
         GetCursorPos(&mut pt);
         SetForegroundWindow(owner);
-        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, owner, null());
+        let cmd = TrackPopupMenu(
+            m,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            0,
+            owner,
+            null(),
+        );
         DestroyMenu(m);
         cmd as usize
     }
@@ -1163,7 +1410,12 @@ fn main_menu() {
     let cmd = popup(|a, m| unsafe {
         let lib = CreatePopupMenu();
         library_items(a, lib);
-        AppendMenuW(m, MF_POPUP | MF_STRING, lib as usize, wide_z("&Library").as_ptr());
+        AppendMenuW(
+            m,
+            MF_POPUP | MF_STRING,
+            lib as usize,
+            wide_z("&Library").as_ptr(),
+        );
         add(m, M_DEVICES, "Play on &device...\tD", false, a.engine.alive);
         sep(m);
         let has_track = a.pb.as_ref().is_some_and(|p| p.track.is_some());
@@ -1173,19 +1425,41 @@ fn main_menu() {
         add(m, M_PREV, "Pre&vious\tZ", false, has_track);
         add(m, M_NEXT, "&Next\tB", false, has_track);
         sep(m);
-        let liked = a.liked == Some(true) && a.pb.as_ref().and_then(|p| p.track.as_ref()).is_some_and(|t| a.liked_uri.as_deref() == Some(&t.uri));
+        let liked = a.liked == Some(true)
+            && a.pb
+                .as_ref()
+                .and_then(|p| p.track.as_ref())
+                .is_some_and(|t| a.liked_uri.as_deref() == Some(&t.uri));
         add(m, M_LIKE, "&Like this song\tF", liked, has_track);
         let (shuffle, repeat) = shuffle_repeat(a);
         add(m, M_SHUFFLE, "S&huffle\tS", shuffle, true);
         let rep = CreatePopupMenu();
-        for (i, (r, label)) in [(Repeat::Off, "Off"), (Repeat::Context, "All"), (Repeat::Track, "One")].into_iter().enumerate() {
+        for (i, (r, label)) in [
+            (Repeat::Off, "Off"),
+            (Repeat::Context, "All"),
+            (Repeat::Track, "One"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             add(rep, M_REPEAT + i, label, repeat == r, true);
         }
-        AppendMenuW(m, MF_POPUP | MF_STRING, rep as usize, wide_z("&Repeat\tR").as_ptr());
+        AppendMenuW(
+            m,
+            MF_POPUP | MF_STRING,
+            rep as usize,
+            wide_z("&Repeat\tR").as_ptr(),
+        );
         sep(m);
         add(m, M_PLWIN, "Playlist &editor\tAlt+E", a.ui.pl_open, true);
         let size = CreatePopupMenu();
-        add(size, M_ZOOM_AUTO, &format!("&Match the screen ({}%)\tCtrl+0", a.auto_pct), a.ui.scale == 0, true);
+        add(
+            size,
+            M_ZOOM_AUTO,
+            &format!("&Match the screen ({}%)\tCtrl+0", a.auto_pct),
+            a.ui.scale == 0,
+            true,
+        );
         sep(size);
         for (i, z) in ZOOMS.iter().enumerate() {
             add(size, M_ZOOM + i, &format!("{z}%"), a.ui.scale == *z, true);
@@ -1193,16 +1467,33 @@ fn main_menu() {
         sep(size);
         add(size, M_ZOOM_IN, "&Larger\tCtrl++", false, a.pct < MAX_PCT);
         add(size, M_ZOOM_OUT, "&Smaller\tCtrl+-", false, a.pct > MIN_PCT);
-        AppendMenuW(m, MF_POPUP | MF_STRING, size as usize, wide_z(&format!("Si&ze ({}%)", a.pct)).as_ptr());
+        AppendMenuW(
+            m,
+            MF_POPUP | MF_STRING,
+            size as usize,
+            wide_z(&format!("Si&ze ({}%)", a.pct)).as_ptr(),
+        );
         add(m, M_DOUBLE, "Dou&ble size\tCtrl+D", a.doubled(), true);
         add(m, M_ONTOP, "Always on &top\tCtrl+T", a.ui.on_top, true);
         add(m, M_SHADE, "&Shade mode\tCtrl+W", a.ui.shade, true);
         add(m, M_SCROLL, "Scroll song t&itle", a.ui.scroll, true);
         add(m, M_REMAINING, "Show time re&maining", a.ui.remaining, true);
         sep(m);
-        add(m, M_RETRY, "Retry the pla&yer", false, a.phase == Phase::Running);
+        add(
+            m,
+            M_RETRY,
+            "Retry the pla&yer",
+            false,
+            a.phase == Phase::Running,
+        );
         add(m, M_SIGNIN, "Sign &in to Spotify again", false, true);
-        add(m, M_SIGNIN_PLAYER, "Sign in the player a&gain", false, a.s.engine);
+        add(
+            m,
+            M_SIGNIN_PLAYER,
+            "Sign in the player a&gain",
+            false,
+            a.s.engine,
+        );
         add(m, M_FOLDER, "Open settings &folder", false, true);
         add(m, M_ABOUT, "About Spo&TermAmp", false, true);
         sep(m);
@@ -1215,8 +1506,16 @@ fn devices_menu() {
     let cmd = popup(|a, m| {
         let eng = a.engine.device_id.clone();
         for (i, d) in a.devices.iter().enumerate().take(50) {
-            let me = if Some(&d.id) == eng.as_ref() { " (this PC)" } else { "" };
-            let label = format!("{}{me}\t{}", d.name.replace('&', "&&"), d.kind.to_lowercase());
+            let me = if Some(&d.id) == eng.as_ref() {
+                " (this PC)"
+            } else {
+                ""
+            };
+            let label = format!(
+                "{}{me}\t{}",
+                d.name.replace('&', "&&"),
+                d.kind.to_lowercase()
+            );
             add(m, M_DEVICE + i, &label, d.active, true);
         }
     });
@@ -1271,14 +1570,23 @@ fn run_command(cmd: usize) {
         M_FOLDER => unsafe {
             let dir = config::config_dir();
             let _ = std::fs::create_dir_all(&dir);
-            ShellExecuteW(null_mut(), wide_z("open").as_ptr(), wide_z(&dir.to_string_lossy()).as_ptr(), null(), null(), SW_SHOWNORMAL);
+            ShellExecuteW(
+                null_mut(),
+                wide_z("open").as_ptr(),
+                wide_z(&dir.to_string_lossy()).as_ptr(),
+                null(),
+                null(),
+                SW_SHOWNORMAL,
+            );
         },
         M_ABOUT => about(),
         M_EXIT => unsafe {
             PostMessageW(a.hmain, WM_CLOSE, 0, 0);
         },
         c if (M_ZOOM..M_ZOOM + ZOOMS.len()).contains(&c) => choose_zoom(a, ZOOMS[c - M_ZOOM]),
-        c if (M_REPEAT..M_REPEAT + 3).contains(&c) => a.set_repeat([Repeat::Off, Repeat::Context, Repeat::Track][c - M_REPEAT]),
+        c if (M_REPEAT..M_REPEAT + 3).contains(&c) => {
+            a.set_repeat([Repeat::Off, Repeat::Context, Repeat::Track][c - M_REPEAT])
+        }
         c if (M_PLAYLIST..M_PLAYLIST + 900).contains(&c) => a.open_playlist(c - M_PLAYLIST),
         c if (M_DEVICE..M_DEVICE + 50).contains(&c) => a.transfer(c - M_DEVICE),
         _ => {}
@@ -1297,8 +1605,16 @@ fn about() {
          S shuffle, R repeat, F like, D devices, L library, J or / search, Ctrl+D double size,\n\
          Ctrl +/- or Ctrl+wheel resize, Ctrl+0 match the screen, Ctrl+T always on top,\n\
          Ctrl+W shade, Alt+E playlist, F5 reload.",
-        env!("CARGO_PKG_VERSION"));
-    unsafe { MessageBoxW(owner, wide_z(&text).as_ptr(), wide_z("About SpoTermAmp").as_ptr(), MB_OK | MB_ICONINFORMATION) };
+        env!("CARGO_PKG_VERSION")
+    );
+    unsafe {
+        MessageBoxW(
+            owner,
+            wide_z(&text).as_ptr(),
+            wide_z("About SpoTermAmp").as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        )
+    };
 }
 
 fn song_info() {
@@ -1306,12 +1622,28 @@ fn song_info() {
     let owner = a.hmain;
     let text = match a.pb.as_ref().and_then(|p| p.track.as_ref()) {
         Some(t) => {
-            let dev = a.pb.as_ref().map_or(String::new(), |p| p.device_name.clone());
-            format!("{}\n{}\n{}\n\n{}  ·  playing on {}", t.name, t.artists, t.album, spotify::fmt_time(t.duration_ms), dev)
+            let dev =
+                a.pb.as_ref()
+                    .map_or(String::new(), |p| p.device_name.clone());
+            format!(
+                "{}\n{}\n{}\n\n{}  ·  playing on {}",
+                t.name,
+                t.artists,
+                t.album,
+                spotify::fmt_time(t.duration_ms),
+                dev
+            )
         }
         None => "Nothing is playing.".into(),
     };
-    unsafe { MessageBoxW(owner, wide_z(&text).as_ptr(), wide_z("Song info").as_ptr(), MB_OK) };
+    unsafe {
+        MessageBoxW(
+            owner,
+            wide_z(&text).as_ptr(),
+            wide_z("Song info").as_ptr(),
+            MB_OK,
+        )
+    };
 }
 
 // ── First run: the Client ID ─────────────────────────────────────────────────
@@ -1330,13 +1662,20 @@ fn ask_client_id() -> Option<String> {
                     let edit = GetDlgItem(h, ID_EDIT as i32);
                     let mut buf = [0u16; 64];
                     let n = GetWindowTextW(edit, buf.as_mut_ptr(), 64);
-                    let cid = String::from_utf16_lossy(&buf[..n.max(0) as usize]).trim().to_string();
+                    let cid = String::from_utf16_lossy(&buf[..n.max(0) as usize])
+                        .trim()
+                        .to_string();
                     if config::valid_client_id(&cid) {
                         RESULT = Some(cid);
                         DestroyWindow(h);
                     } else {
-                        MessageBoxW(h, wide_z("That doesn't look like a Client ID (32 letters and digits).").as_ptr(),
-                                    wide_z("SpoTermAmp").as_ptr(), MB_OK | MB_ICONWARNING);
+                        MessageBoxW(
+                            h,
+                            wide_z("That doesn't look like a Client ID (32 letters and digits).")
+                                .as_ptr(),
+                            wide_z("SpoTermAmp").as_ptr(),
+                            MB_OK | MB_ICONWARNING,
+                        );
                         SetFocus(edit);
                     }
                     return 0;
@@ -1346,7 +1685,14 @@ fn ask_client_id() -> Option<String> {
                     return 0;
                 }
                 if id == ID_LINK as i32 {
-                    ShellExecuteW(null_mut(), wide_z("open").as_ptr(), wide_z(DASHBOARD).as_ptr(), null(), null(), SW_SHOWNORMAL);
+                    ShellExecuteW(
+                        null_mut(),
+                        wide_z("open").as_ptr(),
+                        wide_z(DASHBOARD).as_ptr(),
+                        null(),
+                        null(),
+                        SW_SHOWNORMAL,
+                    );
                     return 0;
                 }
             }
@@ -1381,27 +1727,88 @@ fn ask_client_id() -> Option<String> {
         let (w, h) = (px(460), px(250));
         let x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
         let y = (GetSystemMetrics(SM_CYSCREEN) - h) / 3;
-        let win = CreateWindowExW(WS_EX_DLGMODALFRAME, cls.as_ptr(), wide_z("SpoTermAmp setup").as_ptr(),
-                                  WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, null_mut(), null_mut(), hinst, null());
+        let win = CreateWindowExW(
+            WS_EX_DLGMODALFRAME,
+            cls.as_ptr(),
+            wide_z("SpoTermAmp setup").as_ptr(),
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            x,
+            y,
+            w,
+            h,
+            null_mut(),
+            null_mut(),
+            hinst,
+            null(),
+        );
         if win.is_null() {
             return None;
         }
         let font = gfx::make_font("Segoe UI", px(15), false);
-        let child = |class: &str, text: &str, style: u32, x: i32, y: i32, w: i32, h: i32, id: isize| {
-            let c = CreateWindowExW(if class == "EDIT" { WS_EX_CLIENTEDGE } else { 0 }, wide_z(class).as_ptr(), wide_z(text).as_ptr(),
-                                    WS_CHILD | WS_VISIBLE | style, px(x), px(y), px(w), px(h), win, id as HMENU, hinst, null());
-            SendMessageW(c, WM_SETFONT, font as usize, 1);
-            c
-        };
+        let child =
+            |class: &str, text: &str, style: u32, x: i32, y: i32, w: i32, h: i32, id: isize| {
+                let c = CreateWindowExW(
+                    if class == "EDIT" { WS_EX_CLIENTEDGE } else { 0 },
+                    wide_z(class).as_ptr(),
+                    wide_z(text).as_ptr(),
+                    WS_CHILD | WS_VISIBLE | style,
+                    px(x),
+                    px(y),
+                    px(w),
+                    px(h),
+                    win,
+                    id as HMENU,
+                    hinst,
+                    null(),
+                );
+                SendMessageW(c, WM_SETFONT, font as usize, 1);
+                c
+            };
         child("STATIC", "SpoTermAmp needs the Client ID of your own Spotify app (one-time setup):\n\n\
                          1. Create an app at developer.spotify.com/dashboard.\n\
                          2. Add the redirect URI  http://127.0.0.1:8888/callback  and tick Web API.\n\
                          3. Paste the app's Client ID here (no secret needed).",
               0, 14, 10, 430, 110, 0);
-        let edit = child("EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL as u32, 14, 128, 430, 26, ID_EDIT);
-        child("BUTTON", "Open dashboard", WS_TABSTOP, 14, 172, 130, 30, ID_LINK);
-        child("BUTTON", "OK", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 254, 172, 90, 30, IDOK as isize);
-        child("BUTTON", "Cancel", WS_TABSTOP, 354, 172, 90, 30, IDCANCEL as isize);
+        let edit = child(
+            "EDIT",
+            "",
+            WS_TABSTOP | ES_AUTOHSCROLL as u32,
+            14,
+            128,
+            430,
+            26,
+            ID_EDIT,
+        );
+        child(
+            "BUTTON",
+            "Open dashboard",
+            WS_TABSTOP,
+            14,
+            172,
+            130,
+            30,
+            ID_LINK,
+        );
+        child(
+            "BUTTON",
+            "OK",
+            WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+            254,
+            172,
+            90,
+            30,
+            IDOK as isize,
+        );
+        child(
+            "BUTTON",
+            "Cancel",
+            WS_TABSTOP,
+            354,
+            172,
+            90,
+            30,
+            IDCANCEL as isize,
+        );
         ShowWindow(win, SW_SHOW);
         SetForegroundWindow(win);
         SetFocus(edit);
@@ -1430,19 +1837,33 @@ fn snapshot(dir: &str) -> i32 {
         }
     };
     let s = config::load();
-    let ui = config::UiState { pl_w: 275, pl_h: 232, ..Default::default() };
+    let ui = config::UiState {
+        pl_w: 275,
+        pl_h: 232,
+        ..Default::default()
+    };
     let mut a = App::new(s, ui, sk, Engine::new(Default::default()), 100, 100);
     a.local = true;
     let tracks: Vec<Rc<spotify::Track>> = (0..30)
-        .map(|i| Rc::new(spotify::Track {
-            uri: format!("spotify:track:{i}"),
-            name: if i == 3 { "Lyin' Eyes".into() } else { format!("Song {i}") },
-            artists: if i == 3 { "Eagles".into() } else { "Artist".into() },
-            album: "Album".into(),
-            duration_ms: 180_000 + i * 1000,
-            pos: i,
-            playable: i != 6,
-        }))
+        .map(|i| {
+            Rc::new(spotify::Track {
+                uri: format!("spotify:track:{i}"),
+                name: if i == 3 {
+                    "Lyin' Eyes".into()
+                } else {
+                    format!("Song {i}")
+                },
+                artists: if i == 3 {
+                    "Eagles".into()
+                } else {
+                    "Artist".into()
+                },
+                album: "Album".into(),
+                duration_ms: 180_000 + i * 1000,
+                pos: i,
+                playable: i != 6,
+            })
+        })
         .collect();
     {
         let l = a.lists.get_mut("liked").expect("liked");
@@ -1475,13 +1896,23 @@ fn snapshot(dir: &str) -> i32 {
         a.ui.shade = true;
         let mut shade_sf = Surface::new(MAIN_W, SHADE_H, pct);
         draw_main(&mut a, &mut shade_sf);
-        let name = |n: &str| if pct == 100 { format!("{dir}/{n}.bmp") } else { format!("{dir}/{n}_{pct}.bmp") };
+        let name = |n: &str| {
+            if pct == 100 {
+                format!("{dir}/{n}.bmp")
+            } else {
+                format!("{dir}/{n}_{pct}.bmp")
+            }
+        };
         ok &= write_bmp(&name("main"), main_sf.w, main_sf.h, &main_sf.pixels())
             && write_bmp(&name("pl"), pl_sf.w, pl_sf.h, &pl_sf.pixels())
             && write_bmp(&name("shade"), shade_sf.w, shade_sf.h, &shade_sf.pixels());
     }
     std::mem::forget(a); // no engine, no windows: nothing to clean up
-    if ok { 0 } else { 1 }
+    if ok {
+        0
+    } else {
+        1
+    }
 }
 
 fn write_bmp(path: &str, w: i32, h: i32, px: &[u32]) -> bool {

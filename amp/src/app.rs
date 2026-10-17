@@ -44,7 +44,10 @@ struct Echo<T> {
 
 impl<T> Default for Echo<T> {
     fn default() -> Self {
-        Echo { target: None, until: None }
+        Echo {
+            target: None,
+            until: None,
+        }
     }
 }
 
@@ -92,9 +95,25 @@ pub struct TrackList {
 
 impl TrackList {
     fn new(key: &str, kind: Kind, title: &str) -> TrackList {
-        TrackList { key: key.into(), kind, title: title.into(), context_uri: None, playlist_id: None, query: String::new(),
-                    tracks: Vec::new(), total: 0, next_offset: Some(0), loading: false, error: String::new(), locked: false,
-                    stale: false, gen: 0, retry_at: None, sel: 0, top: 0 }
+        TrackList {
+            key: key.into(),
+            kind,
+            title: title.into(),
+            context_uri: None,
+            playlist_id: None,
+            query: String::new(),
+            tracks: Vec::new(),
+            total: 0,
+            next_offset: Some(0),
+            loading: false,
+            error: String::new(),
+            locked: false,
+            stale: false,
+            gen: 0,
+            retry_at: None,
+            sel: 0,
+            top: 0,
+        }
     }
 
     fn reset(&mut self) {
@@ -115,14 +134,28 @@ impl TrackList {
 enum Req {
     Me,
     Playlists,
-    Page { key: String, gen: u32 },
-    Liked { uri: String },
-    SetLiked { track: Rc<Track>, new: bool },
-    Poll { seq: u32 },
+    Page {
+        key: String,
+        gen: u32,
+    },
+    Liked {
+        uri: String,
+    },
+    SetLiked {
+        track: Rc<Track>,
+        new: bool,
+    },
+    Poll {
+        seq: u32,
+    },
     Devices,
     /// A command for another device; `key` lets a newer press of the same kind win.
-    Cmd { then: Then },
-    Volume { v: u8 },
+    Cmd {
+        then: Then,
+    },
+    Volume {
+        v: u8,
+    },
     Retry,
 }
 
@@ -156,15 +189,27 @@ impl Holds {
     /// Spotify has applied the commands by now: keep each held a little longer from here.
     fn extend(&mut self, now: Instant) {
         let later = |d: &mut Instant| *d = (*d).max(now + Duration::from_millis(2500));
-        if let Some((_, d)) = &mut self.volume { later(d); }
-        if let Some((_, d)) = &mut self.shuffle { later(d); }
-        if let Some((_, d)) = &mut self.repeat { later(d); }
-        if let Some((_, d)) = &mut self.playing { later(d); }
+        if let Some((_, d)) = &mut self.volume {
+            later(d);
+        }
+        if let Some((_, d)) = &mut self.shuffle {
+            later(d);
+        }
+        if let Some((_, d)) = &mut self.repeat {
+            later(d);
+        }
+        if let Some((_, d)) = &mut self.playing {
+            later(d);
+        }
     }
 
     /// Lay what's held over a poll result; true if anything is still unconfirmed.
     fn apply(&mut self, pb: &mut Playback, now: Instant) -> bool {
-        fn one<T: PartialEq + Copy>(slot: &mut Option<(T, Instant)>, got: &mut T, now: Instant) -> bool {
+        fn one<T: PartialEq + Copy>(
+            slot: &mut Option<(T, Instant)>,
+            got: &mut T,
+            now: Instant,
+        ) -> bool {
             match *slot {
                 Some((v, d)) if *got != v && now < d => {
                     *got = v;
@@ -184,7 +229,12 @@ impl Holds {
         pending |= one(&mut self.repeat, &mut pb.repeat, now);
         pending |= one(&mut self.playing, &mut pb.playing, now);
         if let Some((pos, set, until)) = self.progress {
-            let want = pos + if pb.playing { now.saturating_duration_since(set).as_millis() as u32 } else { 0 };
+            let want = pos
+                + if pb.playing {
+                    now.saturating_duration_since(set).as_millis() as u32
+                } else {
+                    0
+                };
             if now >= until || pb.progress(now).abs_diff(want) < 3000 {
                 self.progress = None;
             } else {
@@ -225,11 +275,11 @@ pub enum Phase {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Hold {
     None,
-    Button(u32),     // a main window button id, pressed
-    PlButton(u32),   // a playlist window button id
+    Button(u32),   // a main window button id, pressed
+    PlButton(u32), // a playlist window button id
     Volume,
-    Seek(u32),       // the position the thumb is dragged to
-    PlScroll(i32),   // grab offset in the scroll handle
+    Seek(u32),     // the position the thumb is dragged to
+    PlScroll(i32), // grab offset in the scroll handle
 }
 
 pub struct App {
@@ -328,30 +378,98 @@ pub fn invalidate(h: HWND) {
 
 impl App {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(s: Settings, ui: UiState, skin: Skin, engine: Engine, pct: i32, auto_pct: i32) -> App {
+    pub fn new(
+        s: Settings,
+        ui: UiState,
+        skin: Skin,
+        engine: Engine,
+        pct: i32,
+        auto_pct: i32,
+    ) -> App {
         let mut lists = HashMap::new();
-        lists.insert("liked".to_string(), TrackList::new("liked", Kind::Liked, "Liked Songs"));
-        lists.insert("search".to_string(), TrackList::new("search", Kind::Search, "Search"));
+        lists.insert(
+            "liked".to_string(),
+            TrackList::new("liked", Kind::Liked, "Liked Songs"),
+        );
+        lists.insert(
+            "search".to_string(),
+            TrackList::new("search", Kind::Search, "Search"),
+        );
         let (pw, ph) = (ui.pl_w, ui.pl_h);
         let mut app = App {
-            s, ui, skin, engine, hmain: std::ptr::null_mut(), hpl: std::ptr::null_mut(),
-            main_sf: Surface::new(275, 116, pct), pl_sf: Surface::new(pw, ph, pct),
-            pl_font: std::ptr::null_mut(), small_font: std::ptr::null_mut(), pct, auto_pct,
-            main_active: true, pl_active: false, phase: Phase::Running, hold: Hold::None,
-            hold_inside: false, grab: 0, pref_shuffle: false, pref_repeat: Repeat::Off,
-            pb: None, local: false, liked_uri: None, liked: None, engine_volume: None,
-            vol_echo: Echo::default(), shuffle_echo: Echo::default(), repeat_echo: Echo::default(),
-            play_echo: Echo::default(), seek_echo: Echo::default(),
-            expect_uri: None, expect_name: String::new(), expect_until: None, expect_retry: None,
-            held_track: None, held_state: None, local_grace_until: None, pending_play: None,
-            last_load: None, reload_needed: false, player_warned: false,
-            next_poll: None, poll_inflight: false, cmd_seq: 0, burst: 0, remote_expect: None,
-            holds: Holds::default(), vol_target: None, vol_deadline: None, seek_target: None, seek_deadline: None,
-            restarts: Vec::new(), restart_at: None, poll_err: String::new(),
-            playlists: Vec::new(), playlists_loaded: false, playlists_acc: Vec::new(), user_id: None,
-            lists, cur: "liked".into(), typing: false, eat_char: false, query: String::new(), devices: Vec::new(), devices_wanted: false,
-            pending: HashMap::new(), status: String::new(), status_until: None,
-            marquee_px: 0, marquee_key: String::new(), marquee_next: None, marquee_scrolls: false, timer_at: None,
+            s,
+            ui,
+            skin,
+            engine,
+            hmain: std::ptr::null_mut(),
+            hpl: std::ptr::null_mut(),
+            main_sf: Surface::new(275, 116, pct),
+            pl_sf: Surface::new(pw, ph, pct),
+            pl_font: std::ptr::null_mut(),
+            small_font: std::ptr::null_mut(),
+            pct,
+            auto_pct,
+            main_active: true,
+            pl_active: false,
+            phase: Phase::Running,
+            hold: Hold::None,
+            hold_inside: false,
+            grab: 0,
+            pref_shuffle: false,
+            pref_repeat: Repeat::Off,
+            pb: None,
+            local: false,
+            liked_uri: None,
+            liked: None,
+            engine_volume: None,
+            vol_echo: Echo::default(),
+            shuffle_echo: Echo::default(),
+            repeat_echo: Echo::default(),
+            play_echo: Echo::default(),
+            seek_echo: Echo::default(),
+            expect_uri: None,
+            expect_name: String::new(),
+            expect_until: None,
+            expect_retry: None,
+            held_track: None,
+            held_state: None,
+            local_grace_until: None,
+            pending_play: None,
+            last_load: None,
+            reload_needed: false,
+            player_warned: false,
+            next_poll: None,
+            poll_inflight: false,
+            cmd_seq: 0,
+            burst: 0,
+            remote_expect: None,
+            holds: Holds::default(),
+            vol_target: None,
+            vol_deadline: None,
+            seek_target: None,
+            seek_deadline: None,
+            restarts: Vec::new(),
+            restart_at: None,
+            poll_err: String::new(),
+            playlists: Vec::new(),
+            playlists_loaded: false,
+            playlists_acc: Vec::new(),
+            user_id: None,
+            lists,
+            cur: "liked".into(),
+            typing: false,
+            eat_char: false,
+            query: String::new(),
+            devices: Vec::new(),
+            devices_wanted: false,
+            pending: HashMap::new(),
+            status: String::new(),
+            status_until: None,
+            marquee_px: 0,
+            marquee_key: String::new(),
+            marquee_next: None,
+            marquee_scrolls: false,
+            timer_at: None,
             pl_full: std::cell::Cell::new(true),
         };
         app.set_fonts();
@@ -390,7 +508,14 @@ impl App {
     /// Only the playlist's mini clock changed (the once-a-second tick).
     fn inv_pl_clock(&self) {
         if !self.hpl.is_null() && self.ui.pl_open {
-            invalidate_rect(self.hpl, self.ui.pl_w - 150 + 66, self.ui.pl_h - 38 + 23, 25, 6, self.pct);
+            invalidate_rect(
+                self.hpl,
+                self.ui.pl_w - 150 + 66,
+                self.ui.pl_h - 38 + 23,
+                25,
+                6,
+                self.pct,
+            );
         }
     }
 
@@ -401,7 +526,8 @@ impl App {
 
     pub fn flash(&mut self, msg: impl Into<String>, warn: bool) {
         self.status = msg.into();
-        self.status_until = Some(Instant::now() + Duration::from_millis(if warn { 5000 } else { 2500 }));
+        self.status_until =
+            Some(Instant::now() + Duration::from_millis(if warn { 5000 } else { 2500 }));
         self.inv_main();
     }
 
@@ -434,7 +560,11 @@ impl App {
         if self.marquee_scrolls && self.ui.scroll && self.visible() {
             at(self.marquee_next.or(Some(now + MARQUEE_STEP)));
         }
-        let ms = due.map(|d| d.saturating_duration_since(now).as_millis().clamp(10, 0x7FFF_FFFF) as u32);
+        let ms = due.map(|d| {
+            d.saturating_duration_since(now)
+                .as_millis()
+                .clamp(10, 0x7FFF_FFFF) as u32
+        });
         unsafe {
             match ms {
                 Some(ms) => {
@@ -468,7 +598,10 @@ impl App {
         }
         if self.pending_play.as_ref().is_some_and(|p| now >= p.1) {
             self.pending_play = None;
-            self.flash("SpoTerm's player didn't start: retry from the menu, or pick a device", true);
+            self.flash(
+                "SpoTerm's player didn't start: retry from the menu, or pick a device",
+                true,
+            );
         }
         if self.status_until.is_some_and(|t| now >= t) {
             self.status.clear();
@@ -532,11 +665,16 @@ impl App {
                 self.after_web_sign_in();
             } else {
                 self.phase = Phase::Failed;
-                self.flash_long("Spotify sign-in didn't finish: right-click > Sign in to try again");
+                self.flash_long(
+                    "Spotify sign-in didn't finish: right-click > Sign in to try again",
+                );
             }
         } else {
             if !ok {
-                self.flash("Player sign-in skipped: SpoTermAmp will control other devices", true);
+                self.flash(
+                    "Player sign-in skipped: SpoTermAmp will control other devices",
+                    true,
+                );
             }
             self.start_engine();
         }
@@ -573,14 +711,29 @@ impl App {
     }
 
     // ── Web API plumbing ─────────────────────────────────────────────────────
-    fn request(&mut self, method: &str, path: &str, query: Value, body: Option<Value>, req: Req) -> bool {
+    fn request(
+        &mut self,
+        method: &str,
+        path: &str,
+        query: Value,
+        body: Option<Value>,
+        req: Req,
+    ) -> bool {
         match self.engine.api(method, path, query, body) {
             Some(id) => {
                 self.pending.insert(id, req);
                 true
             }
             None => {
-                self.on_reply(req, Err(ApiError { status: 0, msg: "SpoTerm's engine isn't running".into(), login: false, retry_after: 0 }));
+                self.on_reply(
+                    req,
+                    Err(ApiError {
+                        status: 0,
+                        msg: "SpoTerm's engine isn't running".into(),
+                        login: false,
+                        retry_after: 0,
+                    }),
+                );
                 false
             }
         }
@@ -594,7 +747,16 @@ impl App {
                     let res = match ApiError::from_event(&ev) {
                         // Player commands answer 200 with a bare id that older engines call
                         // malformed: the command worked.
-                        Some(e) if e.status == 0 && e.msg == "Spotify sent a malformed response" && matches!(req, Req::Cmd { .. } | Req::Volume { .. } | Req::Retry) => Ok(Value::Null),
+                        Some(e)
+                            if e.status == 0
+                                && e.msg == "Spotify sent a malformed response"
+                                && matches!(
+                                    req,
+                                    Req::Cmd { .. } | Req::Volume { .. } | Req::Retry
+                                ) =>
+                        {
+                            Ok(Value::Null)
+                        }
                         Some(e) => Err(e),
                         None => Ok(ev["body"].clone()),
                     };
@@ -623,7 +785,10 @@ impl App {
             Req::Playlists => match res {
                 Ok(v) => {
                     sp::playlists(&v, &mut self.playlists_acc);
-                    let next = v["next"].as_str().filter(|_| self.playlists_acc.len() < 10_000).map(str::to_string);
+                    let next = v["next"]
+                        .as_str()
+                        .filter(|_| self.playlists_acc.len() < 10_000)
+                        .map(str::to_string);
                     match next {
                         Some(url) => {
                             self.request("GET", &url, json!({}), None, Req::Playlists);
@@ -643,7 +808,11 @@ impl App {
             Req::Page { key, gen } => self.on_page(&key, gen, res),
             Req::Liked { uri } => match res {
                 Ok(v) if self.liked_uri.as_deref() == Some(&uri) => {
-                    self.liked = Some(v.as_array().and_then(|a| a.first()).is_some_and(|b| b == true));
+                    self.liked = Some(
+                        v.as_array()
+                            .and_then(|a| a.first())
+                            .is_some_and(|b| b == true),
+                    );
                     self.inv_main(); // the title shows a * for liked songs
                 }
                 Err(_) if self.liked_uri.as_deref() == Some(&uri) => self.liked_uri = None,
@@ -651,7 +820,14 @@ impl App {
             },
             Req::SetLiked { track, new } => match res {
                 Ok(_) => {
-                    self.flash(if new { "Added to Liked Songs" } else { "Removed from Liked Songs" }, false);
+                    self.flash(
+                        if new {
+                            "Added to Liked Songs"
+                        } else {
+                            "Removed from Liked Songs"
+                        },
+                        false,
+                    );
                     if self.liked_uri.as_deref() == Some(&track.uri) {
                         self.liked = Some(new);
                         self.inv_main();
@@ -744,7 +920,8 @@ impl App {
             return "No active device, and SpoTerm's player can't connect yet (retrying)".into();
         }
         if e.no_device() {
-            return "Spotify lists no active device: open Spotify somewhere, or pick a device".into();
+            return "Spotify lists no active device: open Spotify somewhere, or pick a device"
+                .into();
         }
         e.describe()
     }
@@ -790,25 +967,42 @@ impl App {
                 }
                 // The engine carries the player and every API call: bring it back. A crash
                 // loop gets three tries a minute, then waits for the menu's Retry.
-                self.restarts.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+                self.restarts
+                    .retain(|t| now.duration_since(*t) < Duration::from_secs(60));
                 self.restarts.push(now);
                 if self.restarts.len() <= 3 {
                     self.flash("SpoTerm's engine stopped: restarting it", true);
                     self.restart_at = Some(now + Duration::from_secs(1));
                 } else {
-                    self.flash("SpoTerm's engine keeps stopping (see engine.log): use Retry", true);
+                    self.flash(
+                        "SpoTerm's engine keeps stopping (see engine.log): use Retry",
+                        true,
+                    );
                 }
                 return;
             }
             "error" => {
                 let msg = sp::text(&ev["msg"]);
-                self.flash(format!("Player: {}", if msg.is_empty() { "command failed".into() } else { msg }), true);
+                self.flash(
+                    format!(
+                        "Player: {}",
+                        if msg.is_empty() {
+                            "command failed".into()
+                        } else {
+                            msg
+                        }
+                    ),
+                    true,
+                );
                 return;
             }
             "player" => {
                 if ev["state"] == "login" {
                     self.pending_play = None;
-                    self.flash("SpoTerm's player needs its sign-in: right-click > Sign in the player", true);
+                    self.flash(
+                        "SpoTerm's player needs its sign-in: right-click > Sign in the player",
+                        true,
+                    );
                 } else if ev["state"] == "retrying" {
                     let why = sp::text(&ev["msg"]);
                     if self.pending_play.take().is_some() {
@@ -817,9 +1011,15 @@ impl App {
                     if !self.player_warned {
                         self.player_warned = true;
                         if why.contains("503") || why.to_lowercase().contains("unavailable") {
-                            self.flash("Spotify's playback service is down (their side): retrying", true);
+                            self.flash(
+                                "Spotify's playback service is down (their side): retrying",
+                                true,
+                            );
                         } else {
-                            self.flash(format!("SpoTerm's player can't connect ({why}): retrying"), true);
+                            self.flash(
+                                format!("SpoTerm's player can't connect ({why}): retrying"),
+                                true,
+                            );
                         }
                     }
                 }
@@ -833,17 +1033,28 @@ impl App {
                         self.reload_needed = true;
                     }
                 }
-                self.next_poll = Some(self.next_poll.map_or(now + POLL_IDLE, |t| t.min(now + POLL_IDLE)));
+                self.next_poll = Some(
+                    self.next_poll
+                        .map_or(now + POLL_IDLE, |t| t.min(now + POLL_IDLE)),
+                );
                 self.flash("Connection to Spotify lost, reconnecting...", true);
                 return;
             }
             "reconnected" => {
                 self.player_warned = false;
-                self.flash(if self.reload_needed { "Reconnected: press play to resume" } else { "Reconnected to Spotify" }, false);
+                self.flash(
+                    if self.reload_needed {
+                        "Reconnected: press play to resume"
+                    } else {
+                        "Reconnected to Spotify"
+                    },
+                    false,
+                );
                 return;
             }
             "active" => {
-                if ev["on"] != true && self.local && self.local_grace_until.is_none_or(|t| now >= t) {
+                if ev["on"] != true && self.local && self.local_grace_until.is_none_or(|t| now >= t)
+                {
                     self.poll_soon(0, Duration::from_millis(350)); // playback may have moved away
                 }
                 return;
@@ -878,7 +1089,8 @@ impl App {
                 }
                 return;
             }
-            "track" | "playing" | "paused" | "loading" | "pos" | "stopped" | "end" | "unavailable" => {}
+            "track" | "playing" | "paused" | "loading" | "pos" | "stopped" | "end"
+            | "unavailable" => {}
             _ => return,
         }
 
@@ -905,8 +1117,13 @@ impl App {
                 self.held_state = None;
                 self.expect_until = Some(now + Duration::from_secs(6));
                 if let Some(dev) = self.engine.device_id.clone() {
-                    self.request("PUT", "me/player/play", json!({"device_id": dev}),
-                                 Some(json!({"context_uri": ctx, "offset": {"uri": track_uri}})), Req::Retry);
+                    self.request(
+                        "PUT",
+                        "me/player/play",
+                        json!({"device_id": dev}),
+                        Some(json!({"context_uri": ctx, "offset": {"uri": track_uri}})),
+                        Req::Retry,
+                    );
                 }
                 return;
             } else {
@@ -925,7 +1142,10 @@ impl App {
     fn expect_done(&mut self, now: Instant) {
         self.expect_uri = None;
         self.expect_retry = None;
-        for (ev, at) in [self.held_track.take(), self.held_state.take()].into_iter().flatten() {
+        for (ev, at) in [self.held_track.take(), self.held_state.take()]
+            .into_iter()
+            .flatten()
+        {
             self.apply_engine(&ev, at, now);
         }
         self.inv_all();
@@ -940,14 +1160,26 @@ impl App {
             let same_dev = old.as_ref().is_some_and(|p| p.device_id == dev);
             // Shuffle and repeat follow you from device to device, as in Spotify's apps.
             self.pb = Some(Playback {
-                track: if same_dev { old.as_ref().and_then(|p| p.track.clone()) } else { None },
+                track: if same_dev {
+                    old.as_ref().and_then(|p| p.track.clone())
+                } else {
+                    None
+                },
                 playing: false,
                 progress_ms: 0,
                 at: now,
                 device_id: dev,
                 device_name: self.s.device_name.clone(),
                 // Our own player always has a volume, even before it has said which.
-                volume: Some(self.engine_volume.or(if same_dev { old.as_ref().and_then(|p| p.volume) } else { None }).unwrap_or(50)),
+                volume: Some(
+                    self.engine_volume
+                        .or(if same_dev {
+                            old.as_ref().and_then(|p| p.volume)
+                        } else {
+                            None
+                        })
+                        .unwrap_or(50),
+                ),
                 shuffle: old.as_ref().map_or(self.pref_shuffle, |p| p.shuffle),
                 repeat: old.as_ref().map_or(self.pref_repeat, |p| p.repeat),
                 context_uri: None,
@@ -968,7 +1200,13 @@ impl App {
         let pos = sp::num(&ev["pos"]).min(u32::MAX as u64) as u32;
         match kind {
             "unavailable" => {
-                if self.local && self.pb.as_ref().and_then(|p| p.track.as_ref()).is_some_and(|t| t.uri == uri) {
+                if self.local
+                    && self
+                        .pb
+                        .as_ref()
+                        .and_then(|p| p.track.as_ref())
+                        .is_some_and(|t| t.uri == uri)
+                {
                     self.flash("That track isn't available here, skipping", true);
                 }
                 return;
@@ -986,7 +1224,11 @@ impl App {
                     let name = sp::text(&ev["name"]);
                     pb.track = Some(Rc::new(Track {
                         uri,
-                        name: if name.is_empty() { "Unknown".into() } else { name },
+                        name: if name.is_empty() {
+                            "Unknown".into()
+                        } else {
+                            name
+                        },
                         artists: sp::text(&ev["artists"]),
                         album: sp::text(&ev["album"]),
                         duration_ms: sp::num(&ev["duration_ms"]).min(u32::MAX as u64) as u32,
@@ -1006,7 +1248,11 @@ impl App {
                 } else if kind == "paused" {
                     pb.playing = false;
                 }
-                let late = if pb.playing && kind != "loading" { now.saturating_duration_since(at).as_millis() as u32 } else { 0 };
+                let late = if pb.playing && kind != "loading" {
+                    now.saturating_duration_since(at).as_millis() as u32
+                } else {
+                    0
+                };
                 pb.progress_ms = pos + late;
                 pb.at = now;
             }
@@ -1030,7 +1276,13 @@ impl App {
         self.liked = None;
         self.marquee_px = 0;
         if t.is_track() {
-            self.request("GET", "me/library/contains", json!({"uris": t.uri}), None, Req::Liked { uri: t.uri.clone() });
+            self.request(
+                "GET",
+                "me/library/contains",
+                json!({"uris": t.uri}),
+                None,
+                Req::Liked { uri: t.uri.clone() },
+            );
         }
     }
 
@@ -1043,7 +1295,13 @@ impl App {
         self.poll_inflight = true;
         self.next_poll = None;
         let seq = self.cmd_seq;
-        self.request("GET", "me/player", json!({"additional_types": "episode", "market": "from_token"}), None, Req::Poll { seq });
+        self.request(
+            "GET",
+            "me/player",
+            json!({"additional_types": "episode", "market": "from_token"}),
+            None,
+            Req::Poll { seq },
+        );
     }
 
     fn poll_soon(&mut self, bursts: u32, delay: Duration) {
@@ -1079,13 +1337,20 @@ impl App {
         }
         let pb = sp::playback(&v, now);
         let eng = self.engine.device_id.clone();
-        if !self.local && eng.is_some() && self.engine.ready && pb.as_ref().is_some_and(|p| p.device_id == eng) {
+        if !self.local
+            && eng.is_some()
+            && self.engine.ready
+            && pb.as_ref().is_some_and(|p| p.device_id == eng)
+        {
             // Spotify says our own player is the device (e.g. it resumed a session there):
             // take it over, so commands go down the pipe instead of through the Web API.
             let p = pb.expect("checked");
             self.local = true;
             self.local_grace_until = None;
-            self.pb = Some(Playback { volume: self.engine_volume.or(p.volume), ..p });
+            self.pb = Some(Playback {
+                volume: self.engine_volume.or(p.volume),
+                ..p
+            });
             self.holds.clear();
             self.remote_expect = None;
             let t = self.pb.as_ref().and_then(|p| p.track.clone());
@@ -1097,7 +1362,11 @@ impl App {
         if self.local {
             if pb.is_none() || (eng.is_some() && pb.as_ref().unwrap().device_id == eng) {
                 // Still ours: the engine's events are fresher, unless it's reconnecting.
-                self.next_poll = if self.engine.ready { None } else { Some(now + POLL_IDLE) };
+                self.next_poll = if self.engine.ready {
+                    None
+                } else {
+                    Some(now + POLL_IDLE)
+                };
                 return;
             }
             if let Some(g) = self.local_grace_until.filter(|g| now < *g) {
@@ -1125,18 +1394,34 @@ impl App {
         }
         let pending = pb.as_mut().is_some_and(|p| self.holds.apply(p, now));
         // Same track: keep the same object so nothing is redrawn for nothing.
-        if let (Some(p), Some(old)) = (pb.as_mut(), self.pb.as_ref().and_then(|o| o.track.clone())) {
-            if p.track.as_ref().is_some_and(|t| t.uri == old.uri && t.duration_ms == old.duration_ms) {
+        if let (Some(p), Some(old)) = (pb.as_mut(), self.pb.as_ref().and_then(|o| o.track.clone()))
+        {
+            if p.track
+                .as_ref()
+                .is_some_and(|t| t.uri == old.uri && t.duration_ms == old.duration_ms)
+            {
                 p.track = Some(old);
             }
         }
         let track = pb.as_ref().and_then(|p| p.track.clone());
         let playing = pb.as_ref().is_some_and(|p| p.playing);
-        let shown = |p: &Option<Playback>| p.as_ref().map(|p| (
-            p.track.as_ref().map(|t| t.uri.clone()), p.playing, p.volume, p.shuffle, p.repeat, p.device_id.clone(),
-            p.progress(now) / 1000, p.track.as_ref().map(|t| t.duration_ms)));
+        let shown = |p: &Option<Playback>| {
+            p.as_ref().map(|p| {
+                (
+                    p.track.as_ref().map(|t| t.uri.clone()),
+                    p.playing,
+                    p.volume,
+                    p.shuffle,
+                    p.repeat,
+                    p.device_id.clone(),
+                    p.progress(now) / 1000,
+                    p.track.as_ref().map(|t| t.duration_ms),
+                )
+            })
+        };
         let (before, after) = (shown(&self.pb), shown(&pb));
-        let same_track = before.as_ref().map(|b| b.0.clone()) == after.as_ref().map(|a| a.0.clone());
+        let same_track =
+            before.as_ref().map(|b| b.0.clone()) == after.as_ref().map(|a| a.0.clone());
         if before != after {
             self.inv_main();
             if !same_track {
@@ -1151,8 +1436,15 @@ impl App {
             self.burst -= 1;
             Duration::from_millis(800)
         } else if let (true, Some(t)) = (playing, &track) {
-            let left = t.duration_ms.saturating_sub(self.pb.as_ref().map_or(0, |p| p.progress(now)));
-            if t.duration_ms > 0 { POLL_PLAYING.min(Duration::from_millis(left as u64 + 400).max(Duration::from_millis(500))) } else { POLL_PLAYING }
+            let left = t
+                .duration_ms
+                .saturating_sub(self.pb.as_ref().map_or(0, |p| p.progress(now)));
+            if t.duration_ms > 0 {
+                POLL_PLAYING
+                    .min(Duration::from_millis(left as u64 + 400).max(Duration::from_millis(500)))
+            } else {
+                POLL_PLAYING
+            }
         } else if playing {
             POLL_PLAYING
         } else {
@@ -1167,12 +1459,23 @@ impl App {
     }
 
     /// A Web API command for another device (always the one shown).
-    fn command(&mut self, method: &str, action: &str, mut query: Map<String, Value>, body: Option<Value>, then: Then) {
+    fn command(
+        &mut self,
+        method: &str,
+        action: &str,
+        mut query: Map<String, Value>,
+        body: Option<Value>,
+        then: Then,
+    ) {
         self.cmd_seq += 1;
         if let Some(dev) = self.pb.as_ref().and_then(|p| p.device_id.clone()) {
             query.entry("device_id").or_insert(Value::String(dev));
         }
-        let path = if action.is_empty() { "me/player".to_string() } else { format!("me/player/{action}") };
+        let path = if action.is_empty() {
+            "me/player".to_string()
+        } else {
+            format!("me/player/{action}")
+        };
         self.request(method, &path, Value::Object(query), body, Req::Cmd { then });
     }
 
@@ -1185,7 +1488,10 @@ impl App {
     }
 
     pub fn engine_can_play(&mut self) -> bool {
-        self.s.engine && Engine::player_signed_in() && self.engine.running() && self.engine.state != "login"
+        self.s.engine
+            && Engine::player_signed_in()
+            && self.engine.running()
+            && self.engine.state != "login"
     }
 
     pub fn toggle_play(&mut self) {
@@ -1197,7 +1503,12 @@ impl App {
             pb.rebase(now);
         }
         let playing = self.pb.as_ref().is_some_and(|p| p.playing);
-        if self.local && self.reload_needed && !playing && self.last_load.is_some() && self.pb.as_ref().is_some_and(|p| p.track.is_some()) {
+        if self.local
+            && self.reload_needed
+            && !playing
+            && self.last_load.is_some()
+            && self.pb.as_ref().is_some_and(|p| p.track.is_some())
+        {
             self.resume_load(now);
         } else if playing {
             self.pause();
@@ -1266,11 +1577,17 @@ impl App {
     }
 
     fn resume_load(&mut self, now: Instant) {
-        let Some(mut load) = self.last_load.clone() else { return };
+        let Some(mut load) = self.last_load.clone() else {
+            return;
+        };
         let Some(pb) = &self.pb else { return };
         let Some(t) = &pb.track else { return };
         load["position_ms"] = json!(pb.progress(now));
-        let key = if load["cmd"] == "play_tracks" { "start_uri" } else { "track_uri" };
+        let key = if load["cmd"] == "play_tracks" {
+            "start_uri"
+        } else {
+            "track_uri"
+        };
         load[key] = json!(t.uri);
         load["shuffle"] = json!(pb.shuffle);
         load["repeat"] = json!(pb.repeat.as_str());
@@ -1292,8 +1609,15 @@ impl App {
         self.seek_target = None;
         self.seek_deadline = None;
         self.holds.progress = None; // a pending seek belongs to the track being left
-        let changes = self.pb.as_ref().is_some_and(|p| p.track.is_some() && (forward || p.progress(now) < 3000));
-        let old = self.pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone());
+        let changes = self
+            .pb
+            .as_ref()
+            .is_some_and(|p| p.track.is_some() && (forward || p.progress(now) < 3000));
+        let old = self
+            .pb
+            .as_ref()
+            .and_then(|p| p.track.as_ref())
+            .map(|t| t.uri.clone());
         if let Some(pb) = &mut self.pb {
             if pb.track.is_some() {
                 pb.progress_ms = 0;
@@ -1303,9 +1627,20 @@ impl App {
         if !self.send(json!({"cmd": if forward { "next" } else { "prev" }})) {
             if changes && !self.local {
                 // Until Spotify moves on, polls still name the old track: don't show it again.
-                self.remote_expect = Some(RemoteExpect { want: None, want_name: String::new(), avoid: old, until: now + Duration::from_secs(4) });
+                self.remote_expect = Some(RemoteExpect {
+                    want: None,
+                    want_name: String::new(),
+                    avoid: old,
+                    until: now + Duration::from_secs(4),
+                });
             }
-            self.command("POST", if forward { "next" } else { "previous" }, Map::new(), None, Then::Nothing);
+            self.command(
+                "POST",
+                if forward { "next" } else { "previous" },
+                Map::new(),
+                None,
+                Then::Nothing,
+            );
         }
         self.inv_all();
     }
@@ -1351,13 +1686,26 @@ impl App {
     }
 
     pub fn volume(&self) -> Option<u8> {
-        self.vol_target.or(self.pb.as_ref().and_then(|p| p.volume)).or(if self.pb.is_none() { self.engine_volume } else { None })
+        self.vol_target
+            .or(self.pb.as_ref().and_then(|p| p.volume))
+            .or(if self.pb.is_none() {
+                self.engine_volume
+            } else {
+                None
+            })
     }
 
     pub fn change_volume(&mut self, delta: i32) {
         let base = self.volume();
         let Some(base) = base else {
-            self.flash(if self.pb.is_some() { "Volume can't be changed on this device" } else { "Nothing is playing" }, true);
+            self.flash(
+                if self.pb.is_some() {
+                    "Volume can't be changed on this device"
+                } else {
+                    "Nothing is playing"
+                },
+                true,
+            );
             return;
         };
         self.set_volume((base as i32 + delta).clamp(0, 100) as u8);
@@ -1406,7 +1754,13 @@ impl App {
         if let Some(dev) = self.pb.as_ref().and_then(|p| p.device_id.clone()) {
             q.insert("device_id".into(), json!(dev));
         }
-        self.request("PUT", "me/player/volume", Value::Object(q), None, Req::Volume { v });
+        self.request(
+            "PUT",
+            "me/player/volume",
+            Value::Object(q),
+            None,
+            Req::Volume { v },
+        );
     }
 
     pub fn toggle_shuffle(&mut self) {
@@ -1415,7 +1769,14 @@ impl App {
         }
         let Some(pb) = &mut self.pb else {
             self.pref_shuffle = !self.pref_shuffle;
-            self.flash(if self.pref_shuffle { "Shuffle: on" } else { "Shuffle: off" }, false);
+            self.flash(
+                if self.pref_shuffle {
+                    "Shuffle: on"
+                } else {
+                    "Shuffle: off"
+                },
+                false,
+            );
             return;
         };
         pb.shuffle = !pb.shuffle;
@@ -1434,7 +1795,11 @@ impl App {
     }
 
     pub fn cycle_repeat(&mut self) {
-        let next = self.pb.as_ref().map_or(self.pref_repeat, |p| p.repeat).next();
+        let next = self
+            .pb
+            .as_ref()
+            .map_or(self.pref_repeat, |p| p.repeat)
+            .next();
         self.set_repeat(next);
     }
 
@@ -1443,7 +1808,14 @@ impl App {
             return;
         }
         self.pref_repeat = r;
-        self.flash(match r { Repeat::Off => "Repeat: off", Repeat::Context => "Repeat: all", Repeat::Track => "Repeat: one" }, false);
+        self.flash(
+            match r {
+                Repeat::Off => "Repeat: off",
+                Repeat::Context => "Repeat: all",
+                Repeat::Track => "Repeat: one",
+            },
+            false,
+        );
         let Some(pb) = &mut self.pb else { return };
         pb.repeat = r;
         if self.send(json!({"cmd": "repeat", "mode": r.as_str()})) {
@@ -1458,7 +1830,9 @@ impl App {
     }
 
     pub fn toggle_like(&mut self) {
-        let Some(t) = self.pb.as_ref().and_then(|p| p.track.clone()) else { return };
+        let Some(t) = self.pb.as_ref().and_then(|p| p.track.clone()) else {
+            return;
+        };
         if !t.is_track() {
             return;
         }
@@ -1471,7 +1845,13 @@ impl App {
         let new = !self.liked.unwrap_or(false);
         self.liked = Some(new);
         let q = json!({"uris": format!("spotify:track:{}", t.id())});
-        self.request(if new { "PUT" } else { "DELETE" }, "me/library", q, None, Req::SetLiked { track: t, new });
+        self.request(
+            if new { "PUT" } else { "DELETE" },
+            "me/library",
+            q,
+            None,
+            Req::SetLiked { track: t, new },
+        );
     }
 
     // ── Choosing what to play ────────────────────────────────────────────────
@@ -1482,22 +1862,33 @@ impl App {
 
     pub fn play_selected(&mut self) {
         let can_play_here = self.engine_can_play();
-        let Some(l) = self.lists.get(&self.cur) else { return };
+        let Some(l) = self.lists.get(&self.cur) else {
+            return;
+        };
         let t = l.tracks.get(l.sel).cloned();
         let (kind, ctx_uri) = (l.kind, l.context_uri.clone());
         if t.is_none() && !(kind == Kind::Playlist && !l.loading) {
             return;
         }
         if t.as_ref().is_some_and(|t| !t.playable) {
-            self.flash("This track can't be played (local file or not available)", true);
+            self.flash(
+                "This track can't be played (local file or not available)",
+                true,
+            );
             return;
         }
         let eng = self.engine.device_id.clone();
         // Whichever device Spotify says is active gets the song, paused or not, as in
         // Spotify's own apps. Our own player takes over only when none is.
-        let remote = self.pb.as_ref().is_some_and(|p| !self.local && p.device_id.is_some() && p.device_id != eng);
+        let remote = self
+            .pb
+            .as_ref()
+            .is_some_and(|p| !self.local && p.device_id.is_some() && p.device_id != eng);
         if !remote && can_play_here {
-            self.play_here(PlayReq { key: self.cur.clone(), uri: t.map(|t| t.uri.clone()) });
+            self.play_here(PlayReq {
+                key: self.cur.clone(),
+                uri: t.map(|t| t.uri.clone()),
+            });
             return;
         }
         let shuffle = self.pb.as_ref().is_some_and(|p| p.shuffle);
@@ -1508,14 +1899,23 @@ impl App {
                 // applies a position to the shuffled order. Only a track that's in the
                 // playlist twice needs its position (which one you picked).
                 let twice = l.tracks.iter().filter(|x| x.uri == t.uri).count() > 1;
-                let off = if twice && !shuffle { json!({"position": t.pos}) } else { json!({"uri": t.uri}) };
+                let off = if twice && !shuffle {
+                    json!({"position": t.pos})
+                } else {
+                    json!({"uri": t.uri})
+                };
                 json!({"context_uri": ctx_uri, "offset": off})
             }
             (Some(t), Kind::Liked) if self.user_id.is_some() => {
                 json!({"context_uri": format!("spotify:user:{}:collection", self.user_id.as_deref().unwrap_or("")), "offset": {"uri": t.uri}})
             }
             (Some(_), _) => {
-                let uris: Vec<&str> = l.tracks[l.sel..].iter().filter(|x| x.playable).take(100).map(|x| x.uri.as_str()).collect();
+                let uris: Vec<&str> = l.tracks[l.sel..]
+                    .iter()
+                    .filter(|x| x.playable)
+                    .take(100)
+                    .map(|x| x.uri.as_str())
+                    .collect();
                 json!({"uris": uris})
             }
         };
@@ -1529,12 +1929,27 @@ impl App {
                     pb.playing = true;
                 }
                 None => {
-                    self.pb = Some(Playback { track: Some(t.clone()), playing: true, progress_ms: 0, at: now, device_id: None,
-                                              device_name: String::new(), volume: None, shuffle: false, repeat: Repeat::Off, context_uri: None });
+                    self.pb = Some(Playback {
+                        track: Some(t.clone()),
+                        playing: true,
+                        progress_ms: 0,
+                        at: now,
+                        device_id: None,
+                        device_name: String::new(),
+                        volume: None,
+                        shuffle: false,
+                        repeat: Repeat::Off,
+                        context_uri: None,
+                    });
                 }
             }
             self.track_changed(Some(t.clone()));
-            self.remote_expect = Some(RemoteExpect { want: Some(t.uri.clone()), want_name: t.name.clone(), avoid: None, until: now + Duration::from_secs(8) });
+            self.remote_expect = Some(RemoteExpect {
+                want: Some(t.uri.clone()),
+                want_name: t.name.clone(),
+                avoid: None,
+                until: now + Duration::from_secs(8),
+            });
         }
         self.seek_target = None;
         self.seek_deadline = None;
@@ -1552,19 +1967,36 @@ impl App {
             self.flash("Starting SpoTerm's player...", false);
             return;
         }
-        let Some(l) = self.lists.get(&req.key) else { return };
-        let t = req.uri.as_ref().and_then(|u| l.tracks.iter().find(|x| &x.uri == u).cloned());
+        let Some(l) = self.lists.get(&req.key) else {
+            return;
+        };
+        let t = req
+            .uri
+            .as_ref()
+            .and_then(|u| l.tracks.iter().find(|x| &x.uri == u).cloned());
         let now = Instant::now();
-        let (shuffle, repeat) = self.pb.as_ref().map_or((self.pref_shuffle, self.pref_repeat), |p| (p.shuffle, p.repeat));
+        let (shuffle, repeat) = self
+            .pb
+            .as_ref()
+            .map_or((self.pref_shuffle, self.pref_repeat), |p| {
+                (p.shuffle, p.repeat)
+            });
         let load = if l.kind == Kind::Playlist {
             json!({"cmd": "play_context", "uri": l.context_uri, "track_uri": t.as_ref().map(|t| t.uri.clone())})
         } else {
             // Liked Songs and search results play as a track list, so the queue runs
             // through everything loaded and shuffle covers all of it.
-            let uris: Vec<&str> = l.tracks.iter().filter(|x| x.playable).map(|x| x.uri.as_str()).collect();
+            let uris: Vec<&str> = l
+                .tracks
+                .iter()
+                .filter(|x| x.playable)
+                .map(|x| x.uri.as_str())
+                .collect();
             json!({"cmd": "play_tracks", "uris": uris, "start_uri": t.as_ref().map(|t| t.uri.clone())})
         };
-        let retry = (l.kind == Kind::Playlist).then(|| l.context_uri.clone()).flatten();
+        let retry = (l.kind == Kind::Playlist)
+            .then(|| l.context_uri.clone())
+            .flatten();
         self.local = true;
         self.local_grace_until = Some(now + Duration::from_secs(8));
         let pb = self.local_pb(now);
@@ -1615,31 +2047,59 @@ impl App {
     }
 
     pub fn transfer(&mut self, idx: usize) {
-        let Some(d) = self.devices.get(idx) else { return };
+        let Some(d) = self.devices.get(idx) else {
+            return;
+        };
         let play = !self.pb.as_ref().is_some_and(|p| !p.playing);
         let (id, name) = (d.id.clone(), d.name.clone());
         self.cmd_seq += 1;
-        self.flash(format!("{} on {name}", if play { "Playing" } else { "Switched" }), false);
-        self.request("PUT", "me/player", json!({}), Some(json!({"device_ids": [id], "play": play})), Req::Cmd { then: Then::Transfer });
+        self.flash(
+            format!("{} on {name}", if play { "Playing" } else { "Switched" }),
+            false,
+        );
+        self.request(
+            "PUT",
+            "me/player",
+            json!({}),
+            Some(json!({"device_ids": [id], "play": play})),
+            Req::Cmd {
+                then: Then::Transfer,
+            },
+        );
     }
 
     // ── Library ──────────────────────────────────────────────────────────────
     pub fn load_playlists(&mut self) {
         self.playlists_acc.clear();
-        self.request("GET", "me/playlists", json!({"limit": sp::PAGE_SIZE}), None, Req::Playlists);
+        self.request(
+            "GET",
+            "me/playlists",
+            json!({"limit": sp::PAGE_SIZE}),
+            None,
+            Req::Playlists,
+        );
     }
 
     pub fn cur_list(&self) -> &TrackList {
-        self.lists.get(&self.cur).or_else(|| self.lists.get("liked")).expect("liked always exists")
+        self.lists
+            .get(&self.cur)
+            .or_else(|| self.lists.get("liked"))
+            .expect("liked always exists")
     }
 
     pub fn cur_list_mut(&mut self) -> &mut TrackList {
-        let key = if self.lists.contains_key(&self.cur) { self.cur.clone() } else { "liked".into() };
+        let key = if self.lists.contains_key(&self.cur) {
+            self.cur.clone()
+        } else {
+            "liked".into()
+        };
         self.lists.get_mut(&key).expect("liked always exists")
     }
 
     pub fn open_playlist(&mut self, idx: usize) {
-        let Some(p) = self.playlists.get(idx) else { return };
+        let Some(p) = self.playlists.get(idx) else {
+            return;
+        };
         let key = format!("pl:{}", p.id);
         if !self.lists.contains_key(&key) {
             let mut l = TrackList::new(&key, Kind::Playlist, &p.name);
@@ -1674,7 +2134,9 @@ impl App {
     }
 
     pub fn load_more(&mut self, key: String) {
-        let Some(l) = self.lists.get_mut(&key) else { return };
+        let Some(l) = self.lists.get_mut(&key) else {
+            return;
+        };
         let Some(off) = l.next_offset else { return };
         if l.loading || l.retry_at.is_some_and(|t| Instant::now() < t) {
             return;
@@ -1682,19 +2144,27 @@ impl App {
         l.loading = true;
         let gen = l.gen;
         let (path, q) = match l.kind {
-            Kind::Liked => ("me/tracks".to_string(), json!({"limit": sp::PAGE_SIZE, "offset": off, "market": "from_token"})),
+            Kind::Liked => (
+                "me/tracks".to_string(),
+                json!({"limit": sp::PAGE_SIZE, "offset": off, "market": "from_token"}),
+            ),
             Kind::Playlist => (
                 format!("playlists/{}/items", l.playlist_id.as_deref().unwrap_or("")),
                 json!({"limit": sp::PLAYLIST_PAGE_SIZE, "offset": off, "fields": sp::playlist_fields(),
                        "additional_types": "track,episode", "market": "from_token"}),
             ),
-            Kind::Search => ("search".to_string(), json!({"q": l.query, "type": "track", "limit": sp::SEARCH_PAGE_SIZE, "offset": off})),
+            Kind::Search => (
+                "search".to_string(),
+                json!({"q": l.query, "type": "track", "limit": sp::SEARCH_PAGE_SIZE, "offset": off}),
+            ),
         };
         self.request("GET", &path, q, None, Req::Page { key, gen });
     }
 
     fn on_page(&mut self, key: &str, gen: u32, res: Result<Value, ApiError>) {
-        let Some(l) = self.lists.get_mut(key) else { return };
+        let Some(l) = self.lists.get_mut(key) else {
+            return;
+        };
         if l.gen != gen {
             return;
         }
@@ -1704,7 +2174,13 @@ impl App {
                 let off = l.next_offset.unwrap_or(0);
                 let page = match l.kind {
                     Kind::Liked => sp::page(&v, off, |i| &i["track"]),
-                    Kind::Playlist => sp::page(&v, off, |i| if i["item"].is_object() { &i["item"] } else { &i["track"] }),
+                    Kind::Playlist => sp::page(&v, off, |i| {
+                        if i["item"].is_object() {
+                            &i["item"]
+                        } else {
+                            &i["track"]
+                        }
+                    }),
                     Kind::Search => sp::page(&v["tracks"], off, |i| i),
                 };
                 l.error.clear();
@@ -1737,7 +2213,8 @@ impl App {
     pub fn prefetch(&mut self) {
         let rows = crate::view::pl_rows(self);
         let l = self.cur_list();
-        let near_end = l.sel + PREFETCH_ROWS >= l.tracks.len() || l.top + rows + PREFETCH_ROWS >= l.tracks.len();
+        let near_end = l.sel + PREFETCH_ROWS >= l.tracks.len()
+            || l.top + rows + PREFETCH_ROWS >= l.tracks.len();
         if l.next_offset.is_some() && near_end {
             let key = l.key.clone();
             self.load_more(key);
@@ -1775,7 +2252,12 @@ impl App {
 
     /// Select the song that's playing, if it's in the open list.
     pub fn jump_to_playing(&mut self) {
-        let Some(uri) = self.pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone()) else {
+        let Some(uri) = self
+            .pb
+            .as_ref()
+            .and_then(|p| p.track.as_ref())
+            .map(|t| t.uri.clone())
+        else {
             self.flash("Nothing is playing", false);
             return;
         };
@@ -1784,18 +2266,34 @@ impl App {
         match l.tracks.iter().position(|t| t.uri == uri) {
             Some(i) => {
                 l.sel = i;
-                l.top = i.saturating_sub(rows / 2).min(l.tracks.len().saturating_sub(rows));
+                l.top = i
+                    .saturating_sub(rows / 2)
+                    .min(l.tracks.len().saturating_sub(rows));
                 self.inv_pl();
             }
-            None => self.flash("The playing song isn't in this list (or not loaded yet)", false),
+            None => self.flash(
+                "The playing song isn't in this list (or not loaded yet)",
+                false,
+            ),
         }
     }
 
     /// Remove the selected song from Liked Songs (the playlist's "-" button).
     pub fn unlike_selected(&mut self) {
-        let Some(t) = self.selected().filter(|t| t.is_track()) else { return };
+        let Some(t) = self.selected().filter(|t| t.is_track()) else {
+            return;
+        };
         let q = json!({"uris": format!("spotify:track:{}", t.id())});
-        self.request("DELETE", "me/library", q, None, Req::SetLiked { track: t, new: false });
+        self.request(
+            "DELETE",
+            "me/library",
+            q,
+            None,
+            Req::SetLiked {
+                track: t,
+                new: false,
+            },
+        );
     }
 
     pub fn start_search(&mut self) {
@@ -1856,13 +2354,26 @@ impl App {
         }
         if let Hold::Seek(pos) = self.hold {
             if let Some(t) = self.pb.as_ref().and_then(|p| p.track.as_ref()) {
-                let pct = if t.duration_ms > 0 { pos as u64 * 100 / t.duration_ms as u64 } else { 0 };
-                return format!("Seek to: {}/{} ({pct}%)", sp::fmt_time(pos), sp::fmt_time(t.duration_ms));
+                let pct = if t.duration_ms > 0 {
+                    pos as u64 * 100 / t.duration_ms as u64
+                } else {
+                    0
+                };
+                return format!(
+                    "Seek to: {}/{} ({pct}%)",
+                    sp::fmt_time(pos),
+                    sp::fmt_time(t.duration_ms)
+                );
             }
         }
         match self.pb.as_ref().and_then(|p| p.track.as_ref()) {
             Some(t) => {
-                let liked = if self.liked == Some(true) && self.liked_uri.as_deref() == Some(&t.uri) { " *" } else { "" };
+                let liked = if self.liked == Some(true) && self.liked_uri.as_deref() == Some(&t.uri)
+                {
+                    " *"
+                } else {
+                    ""
+                };
                 if t.duration_ms > 0 {
                     format!("{} ({}){liked}", t.label(), sp::fmt_time(t.duration_ms))
                 } else {
@@ -1872,7 +2383,9 @@ impl App {
             None => match self.phase {
                 Phase::Running if self.engine.ready => format!("{} ready", self.s.device_name),
                 Phase::Running if !self.engine.alive => "Starting...".into(),
-                Phase::Running if self.engine.state == "retrying" => "Player offline, retrying".into(),
+                Phase::Running if self.engine.state == "retrying" => {
+                    "Player offline, retrying".into()
+                }
                 _ => "SpoTermAmp".into(),
             },
         }
@@ -1889,6 +2402,14 @@ pub fn invalidate_rect(h: HWND, x: i32, y: i32, w: i32, hgt: i32, pct: i32) {
     if h.is_null() {
         return;
     }
-    let r = gfx::phys_rect(&RECT { left: x, top: y, right: x + w, bottom: y + hgt }, pct);
+    let r = gfx::phys_rect(
+        &RECT {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + hgt,
+        },
+        pct,
+    );
     unsafe { InvalidateRect(h, &r, 0) };
 }

@@ -12,7 +12,12 @@ fn test_crash_hook_writes_log() {
         fn new(prefix: &str) -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("spoterm-hook-test-{}-{}-{}", prefix, std::process::id(), id));
+            let path = std::env::temp_dir().join(format!(
+                "spoterm-hook-test-{}-{}-{}",
+                prefix,
+                std::process::id(),
+                id
+            ));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -44,11 +49,18 @@ fn test_crash_hook_writes_log() {
     let output = cmd.output().expect("execute SpoTermAmp --crash-test");
 
     // Process exits with a non-zero status
-    assert!(!output.status.success(), "expected non-zero exit status on panic");
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit status on panic"
+    );
 
     // Assert that <tmp>/.config/spoterm/crash.log exists and contains "crash test (deliberate)"
     let crash_log = tmp.path().join(".config").join("spoterm").join("crash.log");
-    assert!(crash_log.is_file(), "crash.log was not created at {:?}", crash_log);
+    assert!(
+        crash_log.is_file(),
+        "crash.log was not created at {:?}",
+        crash_log
+    );
 
     let content = std::fs::read_to_string(&crash_log).expect("read crash.log");
     assert!(

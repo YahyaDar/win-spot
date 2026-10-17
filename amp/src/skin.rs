@@ -59,7 +59,11 @@ impl Skin {
     pub fn load(wsz: &[u8]) -> Result<Skin, String> {
         let files = unzip(wsz)?;
         let bmp = |name: &str| files.get(name).and_then(|d| decode_bmp(d));
-        let txt = |name: &str| files.get(name).map(|d| String::from_utf8_lossy(d).into_owned());
+        let txt = |name: &str| {
+            files
+                .get(name)
+                .map(|d| String::from_utf8_lossy(d).into_owned())
+        };
         let (numbers, nums_ex) = match bmp("nums_ex.bmp") {
             Some(b) => (Some(b), true),
             None => (bmp("numbers.bmp"), false),
@@ -84,8 +88,12 @@ impl Skin {
             playpaus: bmp("playpaus.bmp"),
             monoster: bmp("monoster.bmp"),
             pledit: bmp("pledit.bmp"),
-            pl: txt("pledit.txt").map(|t| parse_pledit(&t)).unwrap_or_else(default_pl),
-            region: txt("region.txt").map(|t| parse_region(&t)).unwrap_or_default(),
+            pl: txt("pledit.txt")
+                .map(|t| parse_pledit(&t))
+                .unwrap_or_else(default_pl),
+            region: txt("region.txt")
+                .map(|t| parse_region(&t))
+                .unwrap_or_default(),
             text_fg,
             text_bg,
         })
@@ -106,22 +114,36 @@ fn text_colors(b: &Bitmap) -> (u32, u32) {
             }
         }
     }
-    let fg = counts.into_iter().max_by_key(|&(_, n)| n).map(|(c, _)| c).unwrap_or(0xFFFFFF);
+    let fg = counts
+        .into_iter()
+        .max_by_key(|&(_, n)| n)
+        .map(|(c, _)| c)
+        .unwrap_or(0xFFFFFF);
     (fg, bg)
 }
 
 fn default_pl() -> PlColors {
-    PlColors { normal: 0x00FF00, current: 0xFFFFFF, normal_bg: 0x000000, selected_bg: 0x0000C6, font: "Arial".into() }
+    PlColors {
+        normal: 0x00FF00,
+        current: 0xFFFFFF,
+        normal_bg: 0x000000,
+        selected_bg: 0x0000C6,
+        font: "Arial".into(),
+    }
 }
 
 fn parse_pledit(text: &str) -> PlColors {
     let mut pl = default_pl();
     for line in text.lines() {
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
         let color = || {
             let hex = v.trim_start_matches('#');
-            (hex.len() >= 6).then(|| u32::from_str_radix(&hex[..6], 16).ok()).flatten()
+            (hex.len() >= 6)
+                .then(|| u32::from_str_radix(&hex[..6], 16).ok())
+                .flatten()
         };
         match k.as_str() {
             "normal" => pl.normal = color().unwrap_or(pl.normal),
@@ -148,8 +170,13 @@ fn parse_region(text: &str) -> Vec<Vec<(i32, i32)>> {
         if !in_normal {
             continue;
         }
-        let Some((k, v)) = line.split_once('=') else { continue };
-        let nums = || v.split(|c: char| c == ',' || c.is_whitespace()).filter_map(|s| s.trim().parse::<i32>().ok());
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let nums = || {
+            v.split(|c: char| c == ',' || c.is_whitespace())
+                .filter_map(|s| s.trim().parse::<i32>().ok())
+        };
         if k.trim().eq_ignore_ascii_case("numpoints") {
             counts = nums().collect();
         } else if k.trim().eq_ignore_ascii_case("pointlist") {
@@ -163,7 +190,16 @@ fn parse_region(text: &str) -> Vec<Vec<(i32, i32)>> {
         if n < 3 || i + n * 2 > points.len() {
             break;
         }
-        out.push((0..n).map(|k| (points[i + k * 2].clamp(0, 2000), points[i + k * 2 + 1].clamp(0, 2000))).collect());
+        out.push(
+            (0..n)
+                .map(|k| {
+                    (
+                        points[i + k * 2].clamp(0, 2000),
+                        points[i + k * 2 + 1].clamp(0, 2000),
+                    )
+                })
+                .collect(),
+        );
         i += n * 2;
     }
     out
@@ -171,11 +207,13 @@ fn parse_region(text: &str) -> Vec<Vec<(i32, i32)>> {
 
 // ── Zip ──────────────────────────────────────────────────────────────────────
 fn u16le(d: &[u8], at: usize) -> Option<usize> {
-    d.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
+    d.get(at..at + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
 }
 
 fn u32le(d: &[u8], at: usize) -> Option<usize> {
-    d.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    d.get(at..at + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
 }
 
 /// Every file in the archive, by lowercase base name (skins are sometimes zipped with
@@ -197,17 +235,29 @@ fn unzip(d: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> {
         let method = u16le(d, at + 10).ok_or_else(bad)?;
         let csize = u32le(d, at + 20).ok_or_else(bad)?;
         let usize_ = u32le(d, at + 24).ok_or_else(bad)?;
-        let (nlen, xlen, clen) = (u16le(d, at + 28).ok_or_else(bad)?, u16le(d, at + 30).ok_or_else(bad)?, u16le(d, at + 32).ok_or_else(bad)?);
+        let (nlen, xlen, clen) = (
+            u16le(d, at + 28).ok_or_else(bad)?,
+            u16le(d, at + 30).ok_or_else(bad)?,
+            u16le(d, at + 32).ok_or_else(bad)?,
+        );
         let local = u32le(d, at + 42).ok_or_else(bad)?;
         let name = d.get(at + 46..at + 46 + nlen).ok_or_else(bad)?;
         at += 46 + nlen + xlen + clen;
         let name = String::from_utf8_lossy(name).replace('\\', "/");
         let base = name.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
-        if base.is_empty() || usize_ > MAX_FILE || !d.get(local..).is_some_and(|s| s.starts_with(b"PK\x03\x04")) {
+        if base.is_empty()
+            || usize_ > MAX_FILE
+            || !d.get(local..).is_some_and(|s| s.starts_with(b"PK\x03\x04"))
+        {
             continue;
         }
-        let start = local + 30 + u16le(d, local + 26).ok_or_else(bad)? + u16le(d, local + 28).ok_or_else(bad)?;
-        let Some(raw) = d.get(start..start + csize) else { continue };
+        let start = local
+            + 30
+            + u16le(d, local + 26).ok_or_else(bad)?
+            + u16le(d, local + 28).ok_or_else(bad)?;
+        let Some(raw) = d.get(start..start + csize) else {
+            continue;
+        };
         let data = match method {
             0 => raw.to_vec(),
             8 => match miniz_oxide::inflate::decompress_to_vec_with_limit(raw, MAX_FILE) {
@@ -248,7 +298,9 @@ pub fn decode_bmp(d: &[u8]) -> Option<Bitmap> {
     let palette: Vec<u32> = (0..ncol.min(256))
         .map(|i| {
             let p = pal_at + i * 4;
-            d.get(p..p + 3).map(|c| (c[2] as u32) << 16 | (c[1] as u32) << 8 | c[0] as u32).unwrap_or(0)
+            d.get(p..p + 3)
+                .map(|c| (c[2] as u32) << 16 | (c[1] as u32) << 8 | c[0] as u32)
+                .unwrap_or(0)
         })
         .collect();
     let pal = |i: usize| palette.get(i).copied().unwrap_or(0);
@@ -269,14 +321,23 @@ pub fn decode_bmp(d: &[u8]) -> Option<Bitmap> {
                 i += 2;
                 if n > 0 {
                     for k in 0..n {
-                        let idx = if bpp == 8 { v } else if k % 2 == 0 { v >> 4 } else { v & 15 };
+                        let idx = if bpp == 8 {
+                            v
+                        } else if k % 2 == 0 {
+                            v >> 4
+                        } else {
+                            v & 15
+                        };
                         put(x, y, pal(idx));
                         x += 1;
                     }
                     continue;
                 }
                 match v {
-                    0 => { x = 0; y += 1; }
+                    0 => {
+                        x = 0;
+                        y += 1;
+                    }
                     1 => break,
                     2 => {
                         x += *d.get(i)? as i32;
@@ -286,9 +347,15 @@ pub fn decode_bmp(d: &[u8]) -> Option<Bitmap> {
                     n => {
                         let bytes = if bpp == 8 { n } else { n.div_ceil(2) };
                         for k in 0..n {
-                            let idx = if bpp == 8 { *d.get(i + k)? as usize } else {
+                            let idx = if bpp == 8 {
+                                *d.get(i + k)? as usize
+                            } else {
                                 let b = *d.get(i + k / 2)? as usize;
-                                if k % 2 == 0 { b >> 4 } else { b & 15 }
+                                if k % 2 == 0 {
+                                    b >> 4
+                                } else {
+                                    b & 15
+                                }
                             };
                             put(x, y, pal(idx));
                             x += 1;
@@ -302,14 +369,20 @@ pub fn decode_bmp(d: &[u8]) -> Option<Bitmap> {
             let stride = (w as usize * bpp).div_ceil(32) * 4;
             // 16/32-bit masks: BI_BITFIELDS stores them after the 40-byte header.
             let masks = if comp == 3 {
-                Some((u32le(d, 54)? as u32, u32le(d, 58)? as u32, u32le(d, 62)? as u32))
+                Some((
+                    u32le(d, 54)? as u32,
+                    u32le(d, 58)? as u32,
+                    u32le(d, 62)? as u32,
+                ))
             } else if bpp == 16 {
                 Some((0x7C00, 0x03E0, 0x001F))
             } else {
                 None
             };
             let chan = |v: u32, m: u32| -> u32 {
-                if m == 0 { return 0; }
+                if m == 0 {
+                    return 0;
+                }
                 let shift = m.trailing_zeros();
                 let max = m >> shift;
                 ((v & m) >> shift) * 255 / max.max(1)
@@ -321,7 +394,9 @@ pub fn decode_bmp(d: &[u8]) -> Option<Bitmap> {
                 for x in 0..w as usize {
                     out[x] = match bpp {
                         1 => pal((*row.get(x / 8)? as usize >> (7 - x % 8)) & 1),
-                        4 => pal((*row.get(x / 2)? as usize >> if x % 2 == 0 { 4 } else { 0 }) & 15),
+                        4 => {
+                            pal((*row.get(x / 2)? as usize >> if x % 2 == 0 { 4 } else { 0 }) & 15)
+                        }
                         8 => pal(*row.get(x)? as usize),
                         24 => {
                             let c = row.get(x * 3..x * 3 + 3)?;
@@ -334,7 +409,9 @@ pub fn decode_bmp(d: &[u8]) -> Option<Bitmap> {
                                 u32le(row, x * 4)? as u32
                             };
                             match masks {
-                                Some((r, g, b)) if bpp == 16 || comp == 3 => chan(v, r) << 16 | chan(v, g) << 8 | chan(v, b),
+                                Some((r, g, b)) if bpp == 16 || comp == 3 => {
+                                    chan(v, r) << 16 | chan(v, g) << 8 | chan(v, b)
+                                }
                                 _ => v & 0xFFFFFF,
                             }
                         }
@@ -366,7 +443,8 @@ mod tests {
     #[test]
     fn test_parse_pledit() {
         // valid colors
-        let text = "Normal=00FF00\nCurrent=FFFFFF\nNormalBG=000000\nSelectedBG=0000C6\nFont=Tahoma\n";
+        let text =
+            "Normal=00FF00\nCurrent=FFFFFF\nNormalBG=000000\nSelectedBG=0000C6\nFont=Tahoma\n";
         let pl = parse_pledit(text);
         assert_eq!(pl.normal, 0x00FF00);
         assert_eq!(pl.current, 0xFFFFFF);
@@ -567,14 +645,14 @@ mod tests {
             // Local file header: PK\x03\x04
             zip.extend_from_slice(b"PK\x03\x04");
             zip.extend_from_slice(&10u16.to_le_bytes()); // version needed
-            zip.extend_from_slice(&0u16.to_le_bytes());  // flags
-            zip.extend_from_slice(&0u16.to_le_bytes());  // method = 0 (stored)
-            zip.extend_from_slice(&0u32.to_le_bytes());  // mod time/date
-            zip.extend_from_slice(&0u32.to_le_bytes());  // crc32
+            zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+            zip.extend_from_slice(&0u16.to_le_bytes()); // method = 0 (stored)
+            zip.extend_from_slice(&0u32.to_le_bytes()); // mod time/date
+            zip.extend_from_slice(&0u32.to_le_bytes()); // crc32
             zip.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed size
             zip.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncompressed size
             zip.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-            zip.extend_from_slice(&0u16.to_le_bytes());  // extra len
+            zip.extend_from_slice(&0u16.to_le_bytes()); // extra len
             zip.extend_from_slice(name_bytes);
             zip.extend_from_slice(data);
 
@@ -623,9 +701,15 @@ mod tests {
             ("subfolder\\nested.txt", b"nested content"),
         ]);
         let files = unzip(&zip_bytes).unwrap();
-        assert_eq!(files.get("main.txt").map(|v| v.as_slice()), Some(b"main content".as_slice()));
+        assert_eq!(
+            files.get("main.txt").map(|v| v.as_slice()),
+            Some(b"main content".as_slice())
+        );
         // Entry in subfolder with backslashes uses lowercase base name
-        assert_eq!(files.get("nested.txt").map(|v| v.as_slice()), Some(b"nested content".as_slice()));
+        assert_eq!(
+            files.get("nested.txt").map(|v| v.as_slice()),
+            Some(b"nested content".as_slice())
+        );
 
         // Corrupt EOCD (missing signature)
         assert!(unzip(b"not a valid zip file").is_err());

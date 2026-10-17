@@ -31,7 +31,12 @@ pub fn logical(p: i32, pct: i32) -> i32 {
 }
 
 pub fn phys_rect(r: &RECT, pct: i32) -> RECT {
-    RECT { left: phys(r.left, pct), top: phys(r.top, pct), right: phys(r.right, pct), bottom: phys(r.bottom, pct) }
+    RECT {
+        left: phys(r.left, pct),
+        top: phys(r.top, pct),
+        right: phys(r.right, pct),
+        bottom: phys(r.bottom, pct),
+    }
 }
 
 pub struct Surface {
@@ -39,7 +44,7 @@ pub struct Surface {
     bmp: HBITMAP,
     old: HGDIOBJ,
     bits: *mut u32,
-    pub w: i32,  // physical size
+    pub w: i32, // physical size
     pub h: i32,
     pub lw: i32, // logical size
     pub lh: i32,
@@ -60,7 +65,18 @@ impl Surface {
 
     /// A placeholder with no GDI objects, swapped in while the real one is drawn.
     pub fn empty() -> Surface {
-        Surface { dc: null_mut(), bmp: null_mut(), old: null_mut(), bits: null_mut(), w: 0, h: 0, lw: 0, lh: 0, pct: 100, cols: Vec::new() }
+        Surface {
+            dc: null_mut(),
+            bmp: null_mut(),
+            old: null_mut(),
+            bits: null_mut(),
+            w: 0,
+            h: 0,
+            lw: 0,
+            lh: 0,
+            pct: 100,
+            cols: Vec::new(),
+        }
     }
 
     /// Whether the buffer matches this logical size and zoom.
@@ -117,13 +133,38 @@ impl Surface {
     /// Copy logical `w`x`h` from `src` at (sx, sy) to (dx, dy), clipped on both sides and
     /// scaled to the zoom.
     #[allow(clippy::too_many_arguments)] // TODO: consider bundling coordinates into a Rect/BlitArgs struct
-    pub fn blit(&mut self, src: Option<&Bitmap>, sx: i32, sy: i32, w: i32, h: i32, dx: i32, dy: i32) {
+    pub fn blit(
+        &mut self,
+        src: Option<&Bitmap>,
+        sx: i32,
+        sy: i32,
+        w: i32,
+        h: i32,
+        dx: i32,
+        dy: i32,
+    ) {
         let Some(src) = src else { return };
         let (mut sx, mut sy, mut dx, mut dy, mut w, mut h) = (sx, sy, dx, dy, w, h);
-        if sx < 0 { w += sx; dx -= sx; sx = 0; }
-        if sy < 0 { h += sy; dy -= sy; sy = 0; }
-        if dx < 0 { w += dx; sx -= dx; dx = 0; }
-        if dy < 0 { h += dy; sy -= dy; dy = 0; }
+        if sx < 0 {
+            w += sx;
+            dx -= sx;
+            sx = 0;
+        }
+        if sy < 0 {
+            h += sy;
+            dy -= sy;
+            sy = 0;
+        }
+        if dx < 0 {
+            w += dx;
+            sx -= dx;
+            dx = 0;
+        }
+        if dy < 0 {
+            h += dy;
+            sy -= dy;
+            dy = 0;
+        }
         w = w.min(src.w - sx).min(self.lw - dx);
         h = h.min(src.h - sy).min(self.lh - dy);
         if w <= 0 || h <= 0 || self.bits.is_null() {
@@ -157,7 +198,18 @@ impl Surface {
 
     /// Tile a sprite across a logical rectangle (playlist edges).
     #[allow(clippy::too_many_arguments)] // TODO: consider bundling coordinates into a Rect/BlitArgs struct
-    pub fn tile(&mut self, src: Option<&Bitmap>, sx: i32, sy: i32, sw: i32, sh: i32, dx: i32, dy: i32, w: i32, h: i32) {
+    pub fn tile(
+        &mut self,
+        src: Option<&Bitmap>,
+        sx: i32,
+        sy: i32,
+        sw: i32,
+        sh: i32,
+        dx: i32,
+        dy: i32,
+        w: i32,
+        h: i32,
+    ) {
         let mut y = 0;
         while y < h {
             let mut x = 0;
@@ -188,7 +240,13 @@ impl Surface {
         let mut r = phys_rect(&rect, self.pct);
         unsafe {
             SetTextColor(self.dc, rgb(color));
-            DrawTextW(self.dc, s.as_ptr(), s.len() as i32, &mut r, flags | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(
+                self.dc,
+                s.as_ptr(),
+                s.len() as i32,
+                &mut r,
+                flags | DT_SINGLELINE | DT_NOPREFIX,
+            );
         }
     }
 
@@ -200,9 +258,20 @@ impl Surface {
         unsafe {
             let rgn = CreateRectRgn(c.left, c.top, c.right, c.bottom);
             SelectClipRgn(self.dc, rgn);
-            let mut r = RECT { left: phys(x, pct), top: c.top, right: phys(x, pct) + 30_000, bottom: c.bottom };
+            let mut r = RECT {
+                left: phys(x, pct),
+                top: c.top,
+                right: phys(x, pct) + 30_000,
+                bottom: c.bottom,
+            };
             SetTextColor(self.dc, rgb(color));
-            DrawTextW(self.dc, s.as_ptr(), s.len() as i32, &mut r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(
+                self.dc,
+                s.as_ptr(),
+                s.len() as i32,
+                &mut r,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
             SelectClipRgn(self.dc, null_mut());
             DeleteObject(rgn);
         }
@@ -223,7 +292,17 @@ impl Surface {
     pub fn present(&self, hdc: HDC, r: &RECT) {
         unsafe {
             GdiFlush();
-            BitBlt(hdc, r.left, r.top, r.right - r.left, r.bottom - r.top, self.dc, r.left, r.top, SRCCOPY);
+            BitBlt(
+                hdc,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                self.dc,
+                r.left,
+                r.top,
+                SRCCOPY,
+            );
         }
     }
 
@@ -270,7 +349,11 @@ pub fn make_font(face: &str, height: i32, smooth: bool) -> HFONT {
     lf.lfHeight = -height.max(6);
     lf.lfWeight = FW_NORMAL as i32;
     lf.lfCharSet = DEFAULT_CHARSET;
-    lf.lfQuality = if smooth { CLEARTYPE_QUALITY } else { NONANTIALIASED_QUALITY };
+    lf.lfQuality = if smooth {
+        CLEARTYPE_QUALITY
+    } else {
+        NONANTIALIASED_QUALITY
+    };
     for (i, c) in face.encode_utf16().take(31).enumerate() {
         lf.lfFaceName[i] = c;
     }
@@ -294,7 +377,10 @@ pub fn glyph(c: char) -> Option<(i32, i32)> {
     if let Some(i) = row1.chars().position(|x| x == c) {
         return Some((i as i32 * 5, 6));
     }
-    if let Some(i) = row2.chars().position(|x| x == c.to_uppercase().next().unwrap_or(c)) {
+    if let Some(i) = row2
+        .chars()
+        .position(|x| x == c.to_uppercase().next().unwrap_or(c))
+    {
         return Some((i as i32 * 5, 12));
     }
     match c {
@@ -318,7 +404,10 @@ fn fold(c: char) -> char {
     if c.is_ascii() || matches!(c, 'å' | 'ö' | 'ä' | 'Å' | 'Ö' | 'Ä' | '\u{2026}') {
         return c;
     }
-    FROM.chars().position(|x| x == c).and_then(|i| TO.chars().nth(i)).unwrap_or(c)
+    FROM.chars()
+        .position(|x| x == c)
+        .and_then(|i| TO.chars().nth(i))
+        .unwrap_or(c)
 }
 
 /// Whether the skin's font can draw all of `s`.
@@ -328,7 +417,15 @@ pub fn bitmap_font_can(s: &str) -> bool {
 
 /// Draw `s` with the skin font at logical (x, y), starting `skip` pixels into the text
 /// and clipped to `clip_w` pixels. Characters it can't draw show as spaces.
-pub fn bitmap_text(sf: &mut Surface, font: Option<&Bitmap>, s: &str, x: i32, y: i32, skip: i32, clip_w: i32) {
+pub fn bitmap_text(
+    sf: &mut Surface,
+    font: Option<&Bitmap>,
+    s: &str,
+    x: i32,
+    y: i32,
+    skip: i32,
+    clip_w: i32,
+) {
     let Some(font) = font else { return };
     let mut px = -skip;
     for c in s.chars() {
@@ -412,7 +509,12 @@ mod tests {
 
     #[test]
     fn test_phys_rect() {
-        let r = RECT { left: 10, top: 20, right: 30, bottom: 40 };
+        let r = RECT {
+            left: 10,
+            top: 20,
+            right: 30,
+            bottom: 40,
+        };
         let pct = 200;
         let pr = phys_rect(&r, pct);
         assert_eq!(pr.left, phys(10, pct));
