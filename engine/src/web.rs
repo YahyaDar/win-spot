@@ -242,7 +242,8 @@ impl Web {
                 Ok(r) => r,
                 Err(e) => {
                     if let Some(wait) = after_network_error(&mut retries, idempotent) {
-                        log::warn!("retrying after network error: {e}");
+                        let desc = describe_net_error(e);
+                        log::warn!("retrying after network error: {desc}");
                         tokio::time::sleep(wait).await;
                         continue;
                     }
@@ -269,6 +270,10 @@ impl Web {
     }
 }
 
+fn describe_net_error(e: reqwest::Error) -> String {
+    format!("{}", e.without_url())
+}
+
 fn login_needed(msg: &str) -> Failure {
     Failure {
         status: 401,
@@ -284,7 +289,7 @@ fn net_failure(e: reqwest::Error) -> Failure {
     } else if e.is_connect() {
         "Network error: can't reach Spotify".to_string()
     } else {
-        format!("Network error: {}", e.without_url())
+        format!("Network error: {}", describe_net_error(e))
     })
 }
 
@@ -700,5 +705,35 @@ mod tests {
             after_status(&mut r2, 500, 0, true),
             Some(Duration::from_millis(500))
         );
+    }
+
+    #[test]
+    fn test_describe_net_error_redacts_url() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // port refuses connections
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let client = reqwest::Client::new();
+            let url = format!("http://127.0.0.1:{port}/v1/search?q=SECRET_SEARCH_TERM");
+            let err = client.get(&url).send().await.unwrap_err();
+            let raw = err.to_string();
+            assert!(
+                raw.contains("SECRET_SEARCH_TERM"),
+                "raw error must contain URL query: {raw}"
+            );
+
+            let desc = describe_net_error(err);
+            assert!(
+                !desc.contains("SECRET_SEARCH_TERM"),
+                "describe_net_error must not contain secret search term: {desc}"
+            );
+            assert!(!desc.is_empty(), "describe_net_error must not be empty");
+        });
     }
 }

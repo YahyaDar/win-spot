@@ -288,7 +288,7 @@ with `SpoTerm.exe`, then the config folder; real environment variables win).
 | `SPOTERM_ENGINE_BIN` | auto | Path to a `spoterm-engine` binary |
 | `SPOTERM_ASCII` | off | Plain ASCII glyphs |
 | `SPOTERM_TOKEN_PATH` | `<config>/token.json` | Where SpoTerm's login is saved |
-| `SPOTERM_DEBUG` | off | `1` logs keys, play decisions and API calls to `spoterm.log` |
+| `SPOTERM_DEBUG` | off | `1` logs keys, play decisions, API paths and queries, and track names (never tokens) to `spoterm.log`; rotated at about 1 MiB with one previous file (`spoterm.log.1`) kept; review before sharing |
 | `HTTPS_PROXY` / `NO_PROXY` | none | Proxy for Web API traffic |
 
 ## Files

@@ -30,21 +30,68 @@ def config_dir() -> str:
     return os.path.join(base or os.path.join(os.path.expanduser("~"), ".config"), "spoterm")
 
 
+DEBUG_LOG_MAX = 1 << 20  # 1 MiB
 DEBUG = False   # SPOTERM_DEBUG=1: trace keys, playback decisions and API calls (set by load)
 _trace = None
+_trace_size = 0
+
+
+def _rotate_debug_log(log_path: str) -> None:
+    global _trace, _trace_size, DEBUG
+    try:
+        if _trace is not None:
+            _trace.close()
+            _trace = None
+        dot_one = log_path + ".1"
+        if os.path.exists(log_path):
+            os.replace(log_path, dot_one)
+        _trace = open(log_path, "a", encoding="utf-8", buffering=1)
+        _trace_size = 0
+    except OSError:
+        if _trace is not None:
+            try:
+                _trace.close()
+            except OSError:
+                pass
+            _trace = None
+        DEBUG = False
 
 
 def debug(msg: str) -> None:
     """Append a timestamped line to spoterm.log. Callers check DEBUG first, so it's free when off."""
-    global _trace, DEBUG
+    global _trace, _trace_size, DEBUG
+    if not DEBUG:
+        return
+    log_path = os.path.join(config_dir(), "spoterm.log")
     if _trace is None:
         try:
-            _trace = open(os.path.join(config_dir(), "spoterm.log"), "a", encoding="utf-8", buffering=1)
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            if os.path.exists(log_path) and os.path.getsize(log_path) >= DEBUG_LOG_MAX:
+                _rotate_debug_log(log_path)
+            else:
+                _trace = open(log_path, "a", encoding="utf-8", buffering=1)
+                _trace_size = os.path.getsize(log_path)
         except OSError:
             DEBUG = False
             return
+        if not DEBUG or _trace is None:
+            return
+
     import time
-    _trace.write(f"{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d} {msg}\n")
+    line = f"{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d} {msg}\n"
+    try:
+        _trace.write(line)
+        _trace_size += len(line.encode("utf-8"))
+        if _trace_size >= DEBUG_LOG_MAX:
+            _rotate_debug_log(log_path)
+    except OSError:
+        if _trace is not None:
+            try:
+                _trace.close()
+            except OSError:
+                pass
+            _trace = None
+        DEBUG = False
 
 
 class Settings:
