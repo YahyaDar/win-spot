@@ -4,7 +4,7 @@
 //! as blank or "Unknown", never a crash. Text is stripped of control characters.
 
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -350,6 +350,11 @@ pub fn fmt_time(ms: u32) -> String {
     } else {
         format!("{}:{:02}", s / 60, s % 60)
     }
+}
+
+/// Seconds to wait before retrying a failed list load.
+pub fn retry_delay(retry_after: u64) -> Duration {
+    Duration::from_secs(retry_after.clamp(5, 300))
 }
 
 #[cfg(test)]
@@ -979,5 +984,16 @@ mod tests {
         assert_eq!(t2.label(), "Episode Only");
         assert_eq!(t2.id(), "ep999");
         assert!(!t2.is_track());
+    }
+
+    #[test]
+    fn test_retry_delay() {
+        assert_eq!(retry_delay(0), Duration::from_secs(5));
+        assert_eq!(retry_delay(4), Duration::from_secs(5));
+        assert_eq!(retry_delay(5), Duration::from_secs(5));
+        assert_eq!(retry_delay(30), Duration::from_secs(30));
+        assert_eq!(retry_delay(300), Duration::from_secs(300));
+        assert_eq!(retry_delay(301), Duration::from_secs(300));
+        assert_eq!(retry_delay(u64::MAX), Duration::from_secs(300));
     }
 }

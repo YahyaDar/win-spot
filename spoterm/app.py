@@ -1139,7 +1139,7 @@ class App:
                 tl.next_offset = None       # past what Spotify will page through (e.g. search cap)
             else:
                 tl.error = describe_error(err)
-                tl.retry_at = time.monotonic() + 5.0
+                tl.retry_at = time.monotonic() + api.retry_delay(err)
                 tl.want_end = False
                 if tl.tracks:
                     self.flash(f"Couldn't load more: {tl.error}", warn=True)

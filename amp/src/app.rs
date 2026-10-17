@@ -2197,7 +2197,7 @@ impl App {
                     l.next_offset = None; // past what Spotify will page through (search cap)
                 } else {
                     l.error = e.describe();
-                    l.retry_at = Some(Instant::now() + Duration::from_secs(5));
+                    l.retry_at = Some(Instant::now() + sp::retry_delay(e.retry_after));
                     if !l.tracks.is_empty() {
                         let msg = format!("Couldn't load more: {}", l.error);
                         self.flash(msg, true);
