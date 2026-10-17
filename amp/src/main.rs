@@ -10,6 +10,7 @@
 
 mod app;
 mod config;
+mod crash;
 mod engine;
 mod gfx;
 mod skin;
@@ -88,7 +89,12 @@ fn app() -> Option<&'static mut App> {
 }
 
 fn main() {
+    crash::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Hidden flag for automated verification of panic hook / crash log recording.
+    if args.first().map(String::as_str) == Some("--crash-test") {
+        panic!("crash test (deliberate)");
+    }
     if args.first().map(String::as_str) == Some("--snapshot") {
         std::process::exit(snapshot(args.get(1).map_or(".", String::as_str)));
     }
