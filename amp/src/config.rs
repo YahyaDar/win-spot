@@ -193,7 +193,7 @@ pub fn signed_in(token: &Path) -> bool {
 }
 
 // ── Window state (amp.cfg) ───────────────────────────────────────────────────
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UiState {
     pub x: i32,
     pub y: i32,
@@ -221,9 +221,8 @@ fn state_path() -> PathBuf {
     config_dir().join("amp.cfg")
 }
 
-pub fn load_state() -> UiState {
+pub fn parse_state(text: &str) -> UiState {
     let mut s = UiState::default();
-    let Ok(text) = std::fs::read_to_string(state_path()) else { return s };
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else { continue };
         let n = v.trim().parse::<i32>().ok();
@@ -254,12 +253,21 @@ pub fn load_state() -> UiState {
     s
 }
 
-pub fn save_state(s: &UiState) {
-    let text = format!(
+pub fn format_state(s: &UiState) -> String {
+    format!(
         "x={}\ny={}\npl_x={}\npl_y={}\npl_w={}\npl_h={}\npl_open={}\ndocked={}\nscale={}\non_top={}\nscroll={}\nremaining={}\nshade={}\n",
         s.x, s.y, s.pl_x, s.pl_y, s.pl_w, s.pl_h, s.pl_open as i32, s.docked as i32, s.scale, s.on_top as i32,
         s.scroll as i32, s.remaining as i32, s.shade as i32
-    );
+    )
+}
+
+pub fn load_state() -> UiState {
+    let Ok(text) = std::fs::read_to_string(state_path()) else { return UiState::default() };
+    parse_state(&text)
+}
+
+pub fn save_state(s: &UiState) {
+    let text = format_state(s);
     let _ = std::fs::create_dir_all(config_dir());
     let tmp = state_path().with_extension("cfg.tmp");
     if std::fs::write(&tmp, text).is_ok() {
@@ -272,12 +280,202 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_parsing() {
+    fn test_parse_env_extended() {
+        // basic comments and export
         let v = parse_env("# c\nexport A=1\nB = \"x\\ny\" \nC='q # r'\nD=v # comment\n1X=no\nE=\"open\n");
         assert_eq!(v, vec![
             ("A".into(), "1".into()), ("B".into(), "x\ny".into()), ("C".into(), "q # r".into()), ("D".into(), "v".into())
         ]);
-        assert!(valid_client_id("0123456789abcdef0123456789ABCDEF"));
-        assert!(!valid_client_id("xyz"));
+
+        // duplicates are returned in file order (document: callers use first-wins, BUG-04)
+        let dup = parse_env("DUP=first\nDUP=second\n");
+        assert_eq!(dup, vec![("DUP".into(), "first".into()), ("DUP".into(), "second".into())]);
+
+        // escapes in double quotes
+        let esc = parse_env("E=\"\\n\\t\\r\\\"\\\\\\a\"\n");
+        assert_eq!(esc, vec![("E".into(), "\n\t\r\"\\\\a".into())]);
+
+        // unterminated quote skipped
+        let unterm = parse_env("BAD=\"unterminated\nGOOD=1\n");
+        assert_eq!(unterm, vec![("GOOD".into(), "1".into())]);
+
+        // BOM is not handled by parse_env itself (callers strip it)
+        let bom = parse_env("\u{feff}KEY=val\n");
+        assert!(bom.is_empty(), "BOM should cause the key to be rejected by parse_env");
+
+        // NUL skipped
+        let nul = parse_env("NUL=val\0with_nul\nOK=2\n");
+        assert_eq!(nul, vec![("OK".into(), "2".into())]);
+
+        // inline # comment vs # inside value
+        let comments = parse_env("C1=hello # comment\nC2=hello#not_comment\nC3=hello\t# tab comment\n");
+        assert_eq!(comments, vec![
+            ("C1".into(), "hello".into()),
+            ("C2".into(), "hello#not_comment".into()),
+            ("C3".into(), "hello".into()),
+        ]);
+    }
+
+    #[test]
+    fn test_valid_client_id_table() {
+        // 32 hex lowercase
+        assert!(valid_client_id("0123456789abcdef0123456789abcdef"));
+        // 32 hex uppercase
+        assert!(valid_client_id("0123456789ABCDEF0123456789ABCDEF"));
+        // 31 chars
+        assert!(!valid_client_id("0123456789abcdef0123456789abcde"));
+        // 33 chars
+        assert!(!valid_client_id("0123456789abcdef0123456789abcdef0"));
+        // non-hex letters
+        assert!(!valid_client_id("0123456789abcdef0123456789abcdeg"));
+        // empty
+        assert!(!valid_client_id(""));
+    }
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("spoterm-amp-test-{}-{}-{}", prefix, std::process::id(), id));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_signed_in() {
+        let tmp = TempDir::new("signed_in");
+        let token_path = tmp.path().join("token.json");
+
+        let all_scopes = "user-read-playback-state user-modify-playback-state user-read-currently-playing \
+                          user-library-read user-library-modify playlist-read-private \
+                          playlist-read-collaborative streaming";
+
+        // all scopes present is true
+        let valid_json = format!(r#"{{"access_token":"token123","scope":"{all_scopes}"}}"#);
+        std::fs::write(&token_path, valid_json).unwrap();
+        assert!(signed_in(&token_path));
+
+        // extra scopes are fine
+        let extra_scopes = format!("{all_scopes} user-follow-read user-top-read");
+        std::fs::write(&token_path, format!(r#"{{"access_token":"token123","scope":"{extra_scopes}"}}"#)).unwrap();
+        assert!(signed_in(&token_path));
+
+        // scope string with repeated spaces is fine
+        let spaced_scopes = "   user-read-playback-state    user-modify-playback-state    user-read-currently-playing    \
+                             user-library-read    user-library-modify    playlist-read-private    \
+                             playlist-read-collaborative    streaming   ";
+        std::fs::write(&token_path, format!(r#"{{"access_token":"token123","scope":"{spaced_scopes}"}}"#)).unwrap();
+        assert!(signed_in(&token_path));
+
+        // one scope missing is false
+        let missing_scope = "user-read-playback-state user-modify-playback-state user-read-currently-playing \
+                             user-library-read user-library-modify playlist-read-private \
+                             playlist-read-collaborative";
+        std::fs::write(&token_path, format!(r#"{{"access_token":"token123","scope":"{missing_scope}"}}"#)).unwrap();
+        assert!(!signed_in(&token_path));
+
+        // empty access_token is false
+        std::fs::write(&token_path, format!(r#"{{"access_token":"","scope":"{all_scopes}"}}"#)).unwrap();
+        assert!(!signed_in(&token_path));
+
+        // invalid JSON is false
+        std::fs::write(&token_path, "not json").unwrap();
+        assert!(!signed_in(&token_path));
+
+        // missing file is false
+        let missing_path = tmp.path().join("does_not_exist.json");
+        assert!(!signed_in(&missing_path));
+    }
+
+    #[test]
+    fn test_find_engine() {
+        let tmp = TempDir::new("find_engine");
+        let fake_engine = tmp.path().join("my-engine.exe");
+        std::fs::write(&fake_engine, b"").unwrap();
+
+        // explicit path to existing file returns Some
+        assert_eq!(find_engine(fake_engine.to_str().unwrap()), Some(fake_engine.clone()));
+
+        // explicit missing path returns None
+        let missing = tmp.path().join("missing.exe");
+        assert_eq!(find_engine(missing.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn test_parse_and_format_state() {
+        // defaults for empty text
+        let def = parse_state("");
+        assert_eq!(def, UiState::default());
+
+        // round trip of a fully populated state
+        let full = UiState {
+            x: 100,
+            y: 200,
+            pl_x: 100,
+            pl_y: 316,
+            pl_w: 350,
+            pl_h: 400,
+            pl_open: false,
+            docked: false,
+            scale: 200,
+            on_top: true,
+            scroll: false,
+            remaining: true,
+            shade: true,
+        };
+        let formatted = format_state(&full);
+        let parsed = parse_state(&formatted);
+        assert_eq!(parsed, full);
+
+        // legacy scale values
+        assert_eq!(parse_state("scale=1\n").scale, 0);
+        assert_eq!(parse_state("scale=2\n").scale, 200);
+        assert_eq!(parse_state("scale=3\n").scale, 300);
+        assert_eq!(parse_state("scale=4\n").scale, 300); // 400 capped at 300
+        assert_eq!(parse_state("scale=100\n").scale, 100);
+        assert_eq!(parse_state("scale=250\n").scale, 250);
+        assert_eq!(parse_state("scale=300\n").scale, 300);
+        assert_eq!(parse_state("scale=0\n").scale, 0);
+        assert_eq!(parse_state("scale=50\n").scale, 0);
+        assert_eq!(parse_state("scale=500\n").scale, 0);
+
+        // pl_w clamped to 275..=4000
+        assert_eq!(parse_state("pl_w=100\n").pl_w, 275);
+        assert_eq!(parse_state("pl_w=5000\n").pl_w, 4000);
+        assert_eq!(parse_state("pl_w=500\n").pl_w, 500);
+
+        // pl_h clamped to 116..=4000
+        assert_eq!(parse_state("pl_h=50\n").pl_h, 116);
+        assert_eq!(parse_state("pl_h=6000\n").pl_h, 4000);
+        assert_eq!(parse_state("pl_h=300\n").pl_h, 300);
+
+        // non-numeric values keep defaults
+        let non_num = parse_state("x=abc\npl_w=wide\nscale=huge\n");
+        assert_eq!(non_num.x, UiState::default().x);
+        assert_eq!(non_num.pl_w, UiState::default().pl_w);
+        assert_eq!(non_num.scale, UiState::default().scale);
+
+        // unknown keys and lines without '=' ignored
+        let unknown = parse_state("random_line\nunknown_key=123\nx=50\n");
+        assert_eq!(unknown.x, 50);
+
+        // negative coordinates preserved
+        let neg = parse_state("x=-100\ny=-200\npl_x=-50\npl_y=-75\n");
+        assert_eq!(neg.x, -100);
+        assert_eq!(neg.y, -200);
+        assert_eq!(neg.pl_x, -50);
+        assert_eq!(neg.pl_y, -75);
     }
 }

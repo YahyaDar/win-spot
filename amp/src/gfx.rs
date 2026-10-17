@@ -363,4 +363,61 @@ mod tests {
         }
         assert_eq!(phys(-3, 150), -4);
     }
+
+    #[test]
+    fn test_glyph_lookup() {
+        // lowercase and uppercase
+        assert!(glyph('a').is_some());
+        assert_eq!(glyph('a'), glyph('A'));
+
+        // digits
+        assert!(glyph('0').is_some());
+        assert!(glyph('9').is_some());
+
+        // space
+        assert_eq!(glyph(' '), Some((30 * 5, 0)));
+
+        // punctuation
+        assert!(glyph('.').is_some());
+        assert!(glyph('!').is_some());
+
+        // accented letter that folds (for example é)
+        assert_eq!(glyph('é'), glyph('e'));
+
+        // characters mapped to another glyph (< maps to (, ; maps to :)
+        assert_eq!(glyph('<'), glyph('('));
+        assert_eq!(glyph('{'), glyph('('));
+        assert_eq!(glyph('>'), glyph(')'));
+        assert_eq!(glyph('}'), glyph(')'));
+        assert_eq!(glyph(';'), glyph(':'));
+
+        // None for CJK and emoji
+        assert_eq!(glyph('日'), None);
+        assert_eq!(glyph('本'), None);
+        assert_eq!(glyph('😀'), None);
+    }
+
+    #[test]
+    fn test_bitmap_font_can() {
+        assert!(bitmap_font_can("Hello, world! 123"));
+        assert!(!bitmap_font_can("日本"));
+    }
+
+    #[test]
+    fn test_rgb_conversion() {
+        assert_eq!(rgb(0x112233), 0x332211);
+        assert_eq!(rgb(0x00FF00), 0x00FF00);
+        assert_eq!(rgb(0xFF0000), 0x0000FF);
+    }
+
+    #[test]
+    fn test_phys_rect() {
+        let r = RECT { left: 10, top: 20, right: 30, bottom: 40 };
+        let pct = 200;
+        let pr = phys_rect(&r, pct);
+        assert_eq!(pr.left, phys(10, pct));
+        assert_eq!(pr.top, phys(20, pct));
+        assert_eq!(pr.right, phys(30, pct));
+        assert_eq!(pr.bottom, phys(40, pct));
+    }
 }

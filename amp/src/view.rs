@@ -499,3 +499,33 @@ fn mix(a: u32, b: u32) -> u32 {
     let ch = |s: u32| (((a >> s) & 0xFF) + ((b >> s) & 0xFF)) / 2;
     ch(16) << 16 | ch(8) << 8 | ch(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_volume_at() {
+        // Left edge
+        assert_eq!(volume_at(100), 0);
+        assert_eq!(volume_at(114), 0);
+
+        // Middle (107 + 7 + 27 = 141) -> 50%
+        assert_eq!(volume_at(141), 50);
+
+        // Right edge (107 + 7 + 54 = 168) -> 100%
+        assert_eq!(volume_at(168), 100);
+        assert_eq!(volume_at(200), 100);
+
+        // Monotonic over a range of x
+        for x in 100..200 {
+            assert!(volume_at(x) <= volume_at(x + 1), "not monotonic at {x}");
+        }
+    }
+
+    #[test]
+    fn test_mix() {
+        assert_eq!(mix(0, 0xFFFFFF), 0x7F7F7F);
+        assert_eq!(mix(0x102030, 0x102030), 0x102030);
+    }
+}
