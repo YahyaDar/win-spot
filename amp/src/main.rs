@@ -13,6 +13,7 @@ mod config;
 mod crash;
 mod engine;
 mod gfx;
+mod input;
 mod skin;
 mod spotify;
 mod view;
@@ -1209,21 +1210,28 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
     let Some(a) = app() else { return false };
     let ctrl = down(VK_CONTROL);
     if a.typing {
-        match vk {
-            VK_RETURN => a.submit_search(),
-            VK_ESCAPE => {
+        match input::typing_key_action(vk, ctrl) {
+            input::TypingKeyAction::Submit => {
+                reset_input_decoder();
+                a.submit_search();
+            }
+            input::TypingKeyAction::Cancel => {
+                reset_input_decoder();
                 a.typing = false;
                 a.inv_pl();
             }
-            VK_BACK => {
+            input::TypingKeyAction::Backspace => {
+                reset_input_decoder();
                 a.query.pop();
                 a.inv_pl();
             }
-            _ if ctrl && vk == b'U' as u16 => {
+            input::TypingKeyAction::Clear => {
+                reset_input_decoder();
                 a.query.clear();
                 a.inv_pl();
             }
-            _ if ctrl && vk == b'V' as u16 => {
+            input::TypingKeyAction::Paste => {
+                reset_input_decoder();
                 if let Some(t) = clipboard_text() {
                     spotify::append_capped(
                         &mut a.query,
@@ -1233,7 +1241,7 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
                     a.inv_pl();
                 }
             }
-            _ => return false, // letters arrive as WM_CHAR
+            input::TypingKeyAction::Char => return false,
         }
         a.reschedule();
         return true;
@@ -1253,7 +1261,10 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
         _ if ctrl && matches!(vk, 0x30 | VK_NUMPAD0) => choose_zoom(a, 0),
         _ if ctrl && vk == b'T' as u16 => set_on_top(a, !a.ui.on_top),
         _ if ctrl && vk == b'W' as u16 => toggle_shade(a),
-        _ if ctrl && vk == b'F' as u16 => a.start_search(),
+        _ if ctrl && vk == b'F' as u16 => {
+            reset_input_decoder();
+            a.start_search();
+        }
         _ if ctrl => return false,
         0x5A => a.skip(false),              // Z
         0x58 => a.play(),                   // X
@@ -1265,7 +1276,10 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
         0x46 => a.toggle_like(),            // F
         0x44 => a.fetch_devices(),          // D
         0x4C => library_menu(),             // L
-        0x4A => a.start_search(),           // J (Winamp's jump to file)
+        0x4A => {
+            reset_input_decoder();
+            a.start_search();
+        } // J (Winamp's jump to file)
         VK_F5 => a.reload(),
         VK_LEFT => a.seek_by(-app::SEEK_STEP_MS),
         VK_RIGHT => a.seek_by(app::SEEK_STEP_MS),
@@ -1288,9 +1302,20 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
     true
 }
 
+thread_local! {
+    static DECODER: std::cell::RefCell<input::Utf16Decoder> =
+        std::cell::RefCell::new(input::Utf16Decoder::default());
+}
+
+fn reset_input_decoder() {
+    DECODER.with(|d| d.borrow_mut().reset());
+}
+
 fn char_in(c: u32) {
     let Some(a) = app() else { return };
-    let Some(ch) = char::from_u32(c) else { return };
+    let Some(ch) = DECODER.with(|d| d.borrow_mut().push(c)) else {
+        return;
+    };
     if std::mem::take(&mut a.eat_char) && a.typing && ch.eq_ignore_ascii_case(&'j') {
         return;
     }
@@ -1302,6 +1327,7 @@ fn char_in(c: u32) {
         return;
     }
     if ch == '/' {
+        reset_input_decoder();
         a.start_search();
         a.eat_char = false; // this character opened it; nothing else follows
     }
@@ -1524,10 +1550,16 @@ fn devices_menu() {
 
 fn run_command(cmd: usize) {
     let Some(a) = app() else { return };
+    if a.typing {
+        reset_input_decoder();
+    }
     match cmd {
         0 => {}
         M_LIKED => a.open_list("liked"),
-        M_SEARCH => a.start_search(),
+        M_SEARCH => {
+            reset_input_decoder();
+            a.start_search();
+        }
         M_RELOAD => a.reload(),
         M_DEVICES => a.fetch_devices(),
         M_LIKE => a.toggle_like(),
@@ -1562,7 +1594,6 @@ fn run_command(cmd: usize) {
         M_SIGNIN => a.sign_in_again(),
         M_SIGNIN_PLAYER => {
             a.engine.stop();
-            let _ = std::fs::remove_file(Engine::cache_dir().join("credentials.json"));
             a.phase = Phase::PlayerSignIn;
             a.flash("Sign in SpoTerm's player in your browser", false);
             a.engine.sign_in(&a.s, true, a.hmain as isize);
@@ -1828,6 +1859,10 @@ fn ask_client_id() -> Option<String> {
 /// `--snapshot DIR`: draw both windows with sample data into DIR/main.bmp and DIR/pl.bmp,
 /// without opening any window. Used to check the drawing against the skin.
 fn snapshot(dir: &str) -> i32 {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("snapshot dir: {e}");
+        return 1;
+    }
     use std::rc::Rc;
     let sk = match skin::Skin::load(skin::DEFAULT) {
         Ok(s) => s,
@@ -1932,4 +1967,26 @@ fn write_bmp(path: &str, w: i32, h: i32, px: &[u32]) -> bool {
         d.extend_from_slice(&p.to_le_bytes());
     }
     std::fs::write(path, d).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_snapshot_creates_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "amp_snap_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!dir.exists());
+        let rc = snapshot(dir.to_str().unwrap());
+        assert_eq!(rc, 0);
+        assert!(dir.join("main.bmp").exists());
+        assert!(dir.join("pl.bmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

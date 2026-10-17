@@ -112,6 +112,19 @@ class NoDeviceError(Exception):
     """No device to play on. The message, when there is one, says why."""
 
 
+def retry_delay(err, floor: float = 5.0, cap: float = 300.0) -> float:
+    """Seconds to wait before retrying a failed list load."""
+    raw = getattr(err, "retry_after", 0)
+    try:
+        val = float(raw)
+        import math
+        if not math.isfinite(val) or val <= 0:
+            val = 0.0
+    except (TypeError, ValueError):
+        val = 0.0
+    return min(cap, max(floor, val))
+
+
 def _num(v, default: int = 0) -> int:
     """Spotify's numbers, tolerating null, floats or strings."""
     try:

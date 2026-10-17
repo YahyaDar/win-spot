@@ -221,7 +221,7 @@ impl Web {
             .collect();
 
         let mut rejected: Option<String> = None;
-        let mut retried = false;
+        let mut retries = Retries::default();
         loop {
             let token = self.access(rejected.as_deref()).await?;
             let mut req = self
@@ -240,13 +240,15 @@ impl Web {
             };
             let resp = match req.send().await {
                 Ok(r) => r,
-                Err(e) if idempotent && !retried => {
-                    retried = true;
-                    log::warn!("retrying after network error: {e}");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    continue;
+                Err(e) => {
+                    if let Some(wait) = after_network_error(&mut retries, idempotent) {
+                        let desc = describe_net_error(e);
+                        log::warn!("retrying after network error: {desc}");
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                    return Err(net_failure(e));
                 }
-                Err(e) => return Err(net_failure(e)),
             };
             let status = resp.status().as_u16();
             if status == 401 && rejected.is_none() {
@@ -258,20 +260,18 @@ impl Web {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok()),
             );
-            if status == 429 && retry_after <= MAX_WAIT_429 && !retried {
-                retried = true;
-                tokio::time::sleep(Duration::from_secs(retry_after.max(1))).await;
-                continue;
-            }
-            if status >= 500 && idempotent && !retried {
-                retried = true;
-                tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Some(wait) = after_status(&mut retries, status, retry_after, idempotent) {
+                tokio::time::sleep(wait).await;
                 continue;
             }
             let body = read_body(resp).await?;
             return classify(status, retry_after, &body);
         }
     }
+}
+
+fn describe_net_error(e: reqwest::Error) -> String {
+    format!("{}", e.without_url())
 }
 
 fn login_needed(msg: &str) -> Failure {
@@ -289,7 +289,7 @@ fn net_failure(e: reqwest::Error) -> Failure {
     } else if e.is_connect() {
         "Network error: can't reach Spotify".to_string()
     } else {
-        format!("Network error: {}", e.without_url())
+        format!("Network error: {}", describe_net_error(e))
     })
 }
 
@@ -298,6 +298,51 @@ fn parse_retry_after(header: Option<&str>) -> u64 {
     header
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(0)
+}
+
+const MAX_RETRIES_PER_KIND: u8 = 1;
+
+#[derive(Default, Debug, PartialEq)]
+struct Retries {
+    net: u8,
+    rate: u8,
+    server: u8,
+}
+
+/// After a transport error (no HTTP answer). Some(wait) means retry after `wait`.
+fn after_network_error(r: &mut Retries, idempotent: bool) -> Option<Duration> {
+    if idempotent && r.net < MAX_RETRIES_PER_KIND {
+        r.net += 1;
+        Some(Duration::from_millis(500))
+    } else {
+        None
+    }
+}
+
+/// After an HTTP status. Some(wait) means retry after `wait`.
+fn after_status(
+    r: &mut Retries,
+    status: u16,
+    retry_after: u64,
+    idempotent: bool,
+) -> Option<Duration> {
+    if status == 429 {
+        if retry_after <= MAX_WAIT_429 && r.rate < MAX_RETRIES_PER_KIND {
+            r.rate += 1;
+            Some(Duration::from_secs(retry_after.max(1)))
+        } else {
+            None
+        }
+    } else if status >= 500 {
+        if idempotent && r.server < MAX_RETRIES_PER_KIND {
+            r.server += 1;
+            Some(Duration::from_millis(500))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
 
 /// Size-limited body read (the streaming part of today's `read_json`).
@@ -536,5 +581,159 @@ mod tests {
         let serialized = serde_json::to_string(&tok).unwrap();
         let parsed: Token = serde_json::from_str(&serialized).unwrap();
         assert_eq!(tok, parsed);
+    }
+
+    #[test]
+    fn test_retries_sequence_get() {
+        let mut r = Retries::default();
+        // network error then 429 then 500 on a GET: each retried once (three retries in total)
+        assert_eq!(
+            after_network_error(&mut r, true),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            after_status(&mut r, 429, 2, true),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            after_status(&mut r, 500, 0, true),
+            Some(Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn test_retries_two_network_errors() {
+        let mut r = Retries::default();
+        assert_eq!(
+            after_network_error(&mut r, true),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(after_network_error(&mut r, true), None);
+    }
+
+    #[test]
+    fn test_retries_two_429s() {
+        let mut r = Retries::default();
+        assert_eq!(
+            after_status(&mut r, 429, 2, true),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(after_status(&mut r, 429, 2, true), None);
+    }
+
+    #[test]
+    fn test_retries_two_5xx() {
+        let mut r = Retries::default();
+        assert_eq!(
+            after_status(&mut r, 500, 0, true),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(after_status(&mut r, 502, 0, true), None);
+    }
+
+    #[test]
+    fn test_retries_post_not_idempotent() {
+        let mut r = Retries::default();
+        // POST: network error, 500: not retried
+        assert_eq!(after_network_error(&mut r, false), None);
+        assert_eq!(after_status(&mut r, 500, 0, false), None);
+        // POST: 429: retried
+        assert_eq!(
+            after_status(&mut r, 429, 2, false),
+            Some(Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn test_retries_429_delays_and_cap() {
+        // 429 with retry_after 6 (above 5s cap): not retried
+        let mut r1 = Retries::default();
+        assert_eq!(after_status(&mut r1, 429, 6, true), None);
+
+        // 429 with retry_after 0: retried after 1 s
+        let mut r2 = Retries::default();
+        assert_eq!(
+            after_status(&mut r2, 429, 0, true),
+            Some(Duration::from_secs(1))
+        );
+
+        // 429 with retry_after 3: retried after 3 s
+        let mut r3 = Retries::default();
+        assert_eq!(
+            after_status(&mut r3, 429, 3, true),
+            Some(Duration::from_secs(3))
+        );
+    }
+
+    #[test]
+    fn test_retries_unretried_statuses() {
+        for &st in &[200, 204, 301, 400, 401, 403, 404] {
+            let mut r = Retries::default();
+            assert_eq!(after_status(&mut r, st, 0, true), None);
+        }
+    }
+
+    #[test]
+    fn test_retries_5xx_statuses() {
+        for &st in &[500, 502, 503, 599] {
+            let mut r = Retries::default();
+            assert_eq!(
+                after_status(&mut r, st, 0, true),
+                Some(Duration::from_millis(500))
+            );
+        }
+    }
+
+    #[test]
+    fn test_retries_default_and_independent() {
+        let r = Retries::default();
+        assert_eq!(r.net, 0);
+        assert_eq!(r.rate, 0);
+        assert_eq!(r.server, 0);
+
+        // Exhausting net doesn't affect rate or server
+        let mut r2 = Retries {
+            net: MAX_RETRIES_PER_KIND,
+            ..Default::default()
+        };
+        assert_eq!(after_network_error(&mut r2, true), None);
+        assert_eq!(
+            after_status(&mut r2, 429, 2, true),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            after_status(&mut r2, 500, 0, true),
+            Some(Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn test_describe_net_error_redacts_url() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // port refuses connections
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let client = reqwest::Client::new();
+            let url = format!("http://127.0.0.1:{port}/v1/search?q=SECRET_SEARCH_TERM");
+            let err = client.get(&url).send().await.unwrap_err();
+            let raw = err.to_string();
+            assert!(
+                raw.contains("SECRET_SEARCH_TERM"),
+                "raw error must contain URL query: {raw}"
+            );
+
+            let desc = describe_net_error(err);
+            assert!(
+                !desc.contains("SECRET_SEARCH_TERM"),
+                "describe_net_error must not contain secret search term: {desc}"
+            );
+            assert!(!desc.is_empty(), "describe_net_error must not be empty");
+        });
     }
 }

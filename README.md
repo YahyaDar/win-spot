@@ -288,7 +288,7 @@ with `SpoTerm.exe`, then the config folder; real environment variables win).
 | `SPOTERM_ENGINE_BIN` | auto | Path to a `spoterm-engine` binary |
 | `SPOTERM_ASCII` | off | Plain ASCII glyphs |
 | `SPOTERM_TOKEN_PATH` | `<config>/token.json` | Where SpoTerm's login is saved |
-| `SPOTERM_DEBUG` | off | `1` logs keys, play decisions and API calls to `spoterm.log` |
+| `SPOTERM_DEBUG` | off | `1` logs keys, play decisions, API paths and queries, and track names (never tokens) to `spoterm.log`; rotated at about 1 MiB with one previous file (`spoterm.log.1`) kept; review before sharing |
 | `HTTPS_PROXY` / `NO_PROXY` | none | Proxy for Web API traffic |
 
 ## Files
@@ -303,7 +303,7 @@ hidden per-app folder.
 | `.env` | Your settings, e.g. the Client ID `SpoTerm.exe` asks for on first run |
 | `token.json` | SpoTerm's login (the engine refreshes it in place) |
 | `engine/` | The player's saved login, device id and volume |
-| `engine.log` | The engine's log (overwritten each start) |
+| `engine.log` | The engine's log (previous run is kept as `engine.log.1`) |
 | `amp.cfg` | SpoTermAmp's window positions and options |
 | `crash.log` | Only if SpoTerm ever hits a bug: the details, for a bug report |
 

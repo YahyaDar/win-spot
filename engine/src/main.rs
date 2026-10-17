@@ -1248,4 +1248,26 @@ mod tests {
         // run without --cache is an error
         assert!(parse_args_from(["run".into()].into_iter()).is_err());
     }
+
+    #[test]
+    fn test_cache_save_credentials_overwrites() {
+        let tmp = TempDir::new("cache_cred_overwrite");
+        let cache = open_cache(tmp.path()).unwrap();
+        let cred_a = Credentials::with_access_token("token_aaa");
+        let cred_b = Credentials::with_access_token("token_bbb");
+
+        cache.save_credentials(&cred_a);
+        let read_a = cache.credentials().expect("credentials A should be saved");
+        assert_eq!(read_a.auth_data, b"token_aaa");
+
+        // Overwrite with credentials B
+        cache.save_credentials(&cred_b);
+        let read_b = cache.credentials().expect("credentials B should be saved");
+        assert_eq!(read_b.auth_data, b"token_bbb");
+
+        // Verify credentials.json exists and read_b != read_a
+        let cred_file = tmp.path().join("credentials.json");
+        assert!(cred_file.exists());
+        assert_ne!(read_a, read_b);
+    }
 }

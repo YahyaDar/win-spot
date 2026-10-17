@@ -1,6 +1,6 @@
 [package]
 name = "spoterm-engine"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "SpoTerm's built-in Spotify Connect player (librespot), driven over stdin/stdout"
 license = "MIT"

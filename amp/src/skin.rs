@@ -141,9 +141,9 @@ fn parse_pledit(text: &str) -> PlColors {
         let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
         let color = || {
             let hex = v.trim_start_matches('#');
-            (hex.len() >= 6)
-                .then(|| u32::from_str_radix(&hex[..6], 16).ok())
-                .flatten()
+            hex.get(..6)
+                .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
         };
         match k.as_str() {
             "normal" => pl.normal = color().unwrap_or(pl.normal),
@@ -468,13 +468,23 @@ mod tests {
         let mixed = parse_pledit("nOrMaL=123456\nFoNt=Courier\n");
         assert_eq!(mixed.normal, 0x123456);
         assert_eq!(mixed.font, "Courier");
+
+        // additional cases for hex parsing robustness
+        assert_eq!(parse_pledit("Normal=#00FF00\n").normal, 0x00FF00);
+        assert_eq!(parse_pledit("Normal=00ff00\n").normal, 0x00FF00);
+        assert_eq!(parse_pledit("Normal=#12345\n").normal, 0x00FF00); // 5 digits ignored
+        assert_eq!(parse_pledit("Normal=+12345\n").normal, 0x00FF00); // + ignored
+        assert_eq!(parse_pledit("Normal=#GGGGGG\n").normal, 0x00FF00); // non-hex ignored
+        assert_eq!(parse_pledit("Normal=abcde\u{00E9}\n").normal, 0x00FF00); // multibyte crossing byte 6 ignored without panic
+                                                                             // value with trailing garbage after six hex digits: today the first six digits are used
+        assert_eq!(parse_pledit("Normal=123456garbage\n").normal, 0x123456);
     }
 
     #[test]
-    #[ignore = "BUG: parse_pledit byte slicing panics on multibyte character at boundary"]
     fn test_parse_pledit_multibyte_slice() {
         // 5 ASCII bytes + 4-byte emoji: byte 6 is inside the emoji char boundary
-        let _ = parse_pledit("Normal=12345😀\n");
+        let pl = parse_pledit("Normal=12345😀\n");
+        assert_eq!(pl.normal, 0x00FF00);
     }
 
     #[test]
