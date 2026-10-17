@@ -13,6 +13,7 @@ mod config;
 mod crash;
 mod engine;
 mod gfx;
+mod input;
 mod skin;
 mod spotify;
 mod view;
@@ -1210,8 +1211,12 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
     let ctrl = down(VK_CONTROL);
     if a.typing {
         match vk {
-            VK_RETURN => a.submit_search(),
+            VK_RETURN => {
+                reset_input_decoder();
+                a.submit_search();
+            }
             VK_ESCAPE => {
+                reset_input_decoder();
                 a.typing = false;
                 a.inv_pl();
             }
@@ -1253,7 +1258,10 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
         _ if ctrl && matches!(vk, 0x30 | VK_NUMPAD0) => choose_zoom(a, 0),
         _ if ctrl && vk == b'T' as u16 => set_on_top(a, !a.ui.on_top),
         _ if ctrl && vk == b'W' as u16 => toggle_shade(a),
-        _ if ctrl && vk == b'F' as u16 => a.start_search(),
+        _ if ctrl && vk == b'F' as u16 => {
+            reset_input_decoder();
+            a.start_search();
+        }
         _ if ctrl => return false,
         0x5A => a.skip(false),              // Z
         0x58 => a.play(),                   // X
@@ -1265,7 +1273,10 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
         0x46 => a.toggle_like(),            // F
         0x44 => a.fetch_devices(),          // D
         0x4C => library_menu(),             // L
-        0x4A => a.start_search(),           // J (Winamp's jump to file)
+        0x4A => {
+            reset_input_decoder();
+            a.start_search();
+        } // J (Winamp's jump to file)
         VK_F5 => a.reload(),
         VK_LEFT => a.seek_by(-app::SEEK_STEP_MS),
         VK_RIGHT => a.seek_by(app::SEEK_STEP_MS),
@@ -1288,9 +1299,20 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
     true
 }
 
+thread_local! {
+    static DECODER: std::cell::RefCell<input::Utf16Decoder> =
+        std::cell::RefCell::new(input::Utf16Decoder::default());
+}
+
+fn reset_input_decoder() {
+    DECODER.with(|d| d.borrow_mut().reset());
+}
+
 fn char_in(c: u32) {
     let Some(a) = app() else { return };
-    let Some(ch) = char::from_u32(c) else { return };
+    let Some(ch) = DECODER.with(|d| d.borrow_mut().push(c)) else {
+        return;
+    };
     if std::mem::take(&mut a.eat_char) && a.typing && ch.eq_ignore_ascii_case(&'j') {
         return;
     }
@@ -1302,6 +1324,7 @@ fn char_in(c: u32) {
         return;
     }
     if ch == '/' {
+        reset_input_decoder();
         a.start_search();
         a.eat_char = false; // this character opened it; nothing else follows
     }
@@ -1527,7 +1550,10 @@ fn run_command(cmd: usize) {
     match cmd {
         0 => {}
         M_LIKED => a.open_list("liked"),
-        M_SEARCH => a.start_search(),
+        M_SEARCH => {
+            reset_input_decoder();
+            a.start_search();
+        }
         M_RELOAD => a.reload(),
         M_DEVICES => a.fetch_devices(),
         M_LIKE => a.toggle_like(),
