@@ -37,6 +37,9 @@ class TestConfig(unittest.TestCase):
         self.env_patcher.stop()
         self.tmp_dir.cleanup()
 
+    def test_deliberate_ci_fail_python(self):
+        self.fail("deliberate python failure for CI verification")
+
     # ── parse_env basics ────────────────────────────────────────────────────
     def test_parse_env_basics(self):
         text = """

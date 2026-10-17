@@ -280,6 +280,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn deliberate_ci_fail_amp() {
+        assert!(false, "deliberate amp failure for CI verification");
+    }
+
+    #[test]
     fn test_parse_env_extended() {
         // basic comments and export
         let v = parse_env("# c\nexport A=1\nB = \"x\\ny\" \nC='q # r'\nD=v # comment\n1X=no\nE=\"open\n");
