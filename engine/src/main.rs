@@ -115,7 +115,10 @@ fn main() {
 }
 
 fn parse_args() -> Result<(String, Opts)> {
-    let mut args = std::env::args().skip(1);
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from(mut args: impl Iterator<Item = String>) -> Result<(String, Opts)> {
     let mode = args.next().unwrap_or_default();
     let mut opts = Opts {
         cache: PathBuf::new(),
@@ -262,7 +265,7 @@ struct Link {
     session: Session,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 enum Cmd {
     PlayContext {
@@ -676,4 +679,283 @@ fn to_pct(v: u16) -> u8 {
 
 fn from_pct(p: u8) -> u16 {
     (u32::from(p.min(100)) * 65535 / 100) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cmd_play_context_minimal() {
+        let json = r#"{"cmd":"play_context","uri":"spotify:album:test"}"#;
+        let cmd: Cmd = serde_json::from_str(json).unwrap();
+        match cmd {
+            Cmd::PlayContext { uri, track_uri, index, position_ms, shuffle, repeat } => {
+                assert_eq!(uri, "spotify:album:test");
+                assert_eq!(track_uri, None);
+                assert_eq!(index, None);
+                assert_eq!(position_ms, 0);
+                assert!(!shuffle);
+                assert_eq!(repeat, "");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cmd_play_context_full() {
+        let json = r#"{"cmd":"play_context","uri":"spotify:album:test","track_uri":"spotify:track:123","index":2,"position_ms":15000,"shuffle":true,"repeat":"context"}"#;
+        let cmd: Cmd = serde_json::from_str(json).unwrap();
+        match cmd {
+            Cmd::PlayContext { uri, track_uri, index, position_ms, shuffle, repeat } => {
+                assert_eq!(uri, "spotify:album:test");
+                assert_eq!(track_uri.as_deref(), Some("spotify:track:123"));
+                assert_eq!(index, Some(2));
+                assert_eq!(position_ms, 15000);
+                assert!(shuffle);
+                assert_eq!(repeat, "context");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cmd_play_tracks() {
+        let min = r#"{"cmd":"play_tracks","uris":["spotify:track:1","spotify:track:2"]}"#;
+        let cmd: Cmd = serde_json::from_str(min).unwrap();
+        match cmd {
+            Cmd::PlayTracks { uris, start_uri, position_ms, shuffle, repeat } => {
+                assert_eq!(uris, vec!["spotify:track:1", "spotify:track:2"]);
+                assert_eq!(start_uri, None);
+                assert_eq!(position_ms, 0);
+                assert!(!shuffle);
+                assert_eq!(repeat, "");
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let full = r#"{"cmd":"play_tracks","uris":["spotify:track:1"],"start_uri":"spotify:track:1","position_ms":3000,"shuffle":true,"repeat":"track"}"#;
+        let cmd_full: Cmd = serde_json::from_str(full).unwrap();
+        match cmd_full {
+            Cmd::PlayTracks { uris, start_uri, position_ms, shuffle, repeat } => {
+                assert_eq!(uris, vec!["spotify:track:1"]);
+                assert_eq!(start_uri.as_deref(), Some("spotify:track:1"));
+                assert_eq!(position_ms, 3000);
+                assert!(shuffle);
+                assert_eq!(repeat, "track");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cmd_simple_variants() {
+        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"play"}"#).unwrap(), Cmd::Play));
+        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"pause"}"#).unwrap(), Cmd::Pause));
+        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"toggle"}"#).unwrap(), Cmd::Toggle));
+        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"next"}"#).unwrap(), Cmd::Next));
+        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"prev"}"#).unwrap(), Cmd::Prev));
+        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"activate"}"#).unwrap(), Cmd::Activate));
+        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"reconnect"}"#).unwrap(), Cmd::Reconnect));
+        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"quit"}"#).unwrap(), Cmd::Quit));
+
+        match serde_json::from_str::<Cmd>(r#"{"cmd":"seek","ms":5000}"#).unwrap() {
+            Cmd::Seek { ms } => assert_eq!(ms, 5000),
+            _ => panic!("wrong variant"),
+        }
+
+        match serde_json::from_str::<Cmd>(r#"{"cmd":"volume","pct":75}"#).unwrap() {
+            Cmd::Volume { pct } => assert_eq!(pct, 75),
+            _ => panic!("wrong variant"),
+        }
+
+        match serde_json::from_str::<Cmd>(r#"{"cmd":"shuffle","on":true}"#).unwrap() {
+            Cmd::Shuffle { on } => assert!(on),
+            _ => panic!("wrong variant"),
+        }
+
+        match serde_json::from_str::<Cmd>(r#"{"cmd":"repeat","mode":"track"}"#).unwrap() {
+            Cmd::Repeat { mode } => assert_eq!(mode, "track"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cmd_api() {
+        let def = r#"{"cmd":"api","id":100,"path":"/v1/me"}"#;
+        match serde_json::from_str::<Cmd>(def).unwrap() {
+            Cmd::Api { id, method, path, query, body } => {
+                assert_eq!(id, 100);
+                assert_eq!(method, "GET");
+                assert_eq!(path, "/v1/me");
+                assert_eq!(query, None);
+                assert_eq!(body, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let full = r#"{"cmd":"api","id":101,"method":"POST","path":"/v1/me/player/next","query":{"dev":"x"},"body":{"ok":true}}"#;
+        match serde_json::from_str::<Cmd>(full).unwrap() {
+            Cmd::Api { id, method, path, query, body } => {
+                assert_eq!(id, 101);
+                assert_eq!(method, "POST");
+                assert_eq!(path, "/v1/me/player/next");
+                assert!(query.is_some());
+                assert_eq!(query.unwrap().get("dev"), Some(&json!("x")));
+                assert_eq!(body, Some(json!({"ok": true})));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cmd_invalid_and_unknown_fields() {
+        // unknown cmd fails
+        assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"dance"}"#).is_err());
+        // missing required field fails
+        assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"play_context"}"#).is_err());
+        assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"seek"}"#).is_err());
+        assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"volume"}"#).is_err());
+        assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"shuffle"}"#).is_err());
+        assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"repeat"}"#).is_err());
+        assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"api","id":1}"#).is_err());
+        // wrong type fails
+        assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"seek","ms":"x"}"#).is_err());
+        assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"volume","pct":"loud"}"#).is_err());
+        assert!(serde_json::from_str::<Cmd>(r#"{"cmd":"shuffle","on":"yes"}"#).is_err());
+        // extra unknown fields accepted
+        assert!(matches!(serde_json::from_str::<Cmd>(r#"{"cmd":"play","extra":123}"#).unwrap(), Cmd::Play));
+        assert!(matches!(
+            serde_json::from_str::<Cmd>(r#"{"cmd":"seek","ms":100,"extra_field":"ignored"}"#).unwrap(),
+            Cmd::Seek { ms: 100 }
+        ));
+    }
+
+    #[test]
+    fn test_volume_math() {
+        for p in 0..=100 {
+            assert_eq!(to_pct(from_pct(p)), p, "roundtrip failed for {p}");
+        }
+        for p in 0..100 {
+            assert!(from_pct(p) <= from_pct(p + 1), "not monotonic at {p}");
+        }
+        assert_eq!(from_pct(200), 65535);
+        assert_eq!(from_pct(200), from_pct(100));
+        assert_eq!(to_pct(0), 0);
+        assert_eq!(to_pct(65535), 100);
+    }
+
+    #[test]
+    fn test_is_credentials_error() {
+        assert!(is_credentials_error(&anyhow!("INVALID_CREDENTIALS: login failed")));
+        assert!(is_credentials_error(&anyhow!("error: BadCredentials")));
+        assert!(is_credentials_error(&anyhow!("Bad credentials provided")));
+        assert!(!is_credentials_error(&anyhow!("connection reset")));
+        assert!(!is_credentials_error(&anyhow!("device not found")));
+    }
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("spoterm-test-{}-{}-{}", prefix, std::process::id(), id));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_session_config_device_id() {
+        let tmp = TempDir::new("session_cfg");
+        let dev_file = tmp.path().join("device_id");
+
+        // Fresh temp dir creates device_id
+        let cfg1 = session_config(tmp.path());
+        assert!(dev_file.is_file());
+        let saved_id = std::fs::read_to_string(&dev_file).unwrap();
+        assert_eq!(cfg1.device_id, saved_id);
+        assert!(cfg1.device_id.len() >= 16);
+
+        // Calling twice returns the same id
+        let cfg2 = session_config(tmp.path());
+        assert_eq!(cfg1.device_id, cfg2.device_id);
+
+        // A device_id file shorter than 16 characters is replaced
+        std::fs::write(&dev_file, "short").unwrap();
+        let cfg3 = session_config(tmp.path());
+        assert_ne!(cfg3.device_id, "short");
+        assert!(cfg3.device_id.len() >= 16);
+        let replaced_id = std::fs::read_to_string(&dev_file).unwrap();
+        assert_eq!(cfg3.device_id, replaced_id);
+    }
+
+    #[test]
+    fn test_parse_args_from() {
+        // run with only --cache
+        let (mode, opts) = parse_args_from(["run".into(), "--cache".into(), "cache_dir".into()].into_iter()).unwrap();
+        assert_eq!(mode, "run");
+        assert_eq!(opts.cache, PathBuf::from("cache_dir"));
+        assert!(opts.player);
+        assert_eq!(opts.name, "SpoTerm");
+        assert_eq!(opts.volume_pct, 50);
+        assert!(matches!(opts.bitrate, Bitrate::Bitrate160));
+
+        // --no-player
+        let (_, opts) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--no-player".into()].into_iter()).unwrap();
+        assert!(!opts.player);
+
+        // bitrate 96, 320, and anything else maps to 160
+        let (_, opts96) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--bitrate".into(), "96".into()].into_iter()).unwrap();
+        assert!(matches!(opts96.bitrate, Bitrate::Bitrate96));
+
+        let (_, opts320) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--bitrate".into(), "320".into()].into_iter()).unwrap();
+        assert!(matches!(opts320.bitrate, Bitrate::Bitrate320));
+
+        let (_, opts160) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--bitrate".into(), "160".into()].into_iter()).unwrap();
+        assert!(matches!(opts160.bitrate, Bitrate::Bitrate160));
+
+        let (_, opts_other) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--bitrate".into(), "custom".into()].into_iter()).unwrap();
+        assert!(matches!(opts_other.bitrate, Bitrate::Bitrate160));
+
+        // --volume clamps to 100 and falls back to 50 on garbage
+        let (_, opts_vol_high) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--volume".into(), "200".into()].into_iter()).unwrap();
+        assert_eq!(opts_vol_high.volume_pct, 100);
+
+        let (_, opts_vol_garbage) = parse_args_from(["run".into(), "--cache".into(), "c".into(), "--volume".into(), "xyz".into()].into_iter()).unwrap();
+        assert_eq!(opts_vol_garbage.volume_pct, 50);
+
+        // flag without value is an error
+        assert!(parse_args_from(["run".into(), "--cache".into()].into_iter()).is_err());
+        assert!(parse_args_from(["run".into(), "--cache".into(), "c".into(), "--name".into()].into_iter()).is_err());
+
+        // unknown flag is an error
+        assert!(parse_args_from(["run".into(), "--cache".into(), "c".into(), "--unknown-flag".into()].into_iter()).is_err());
+
+        // weblogin requires --client-id and --token
+        assert!(parse_args_from(["weblogin".into()].into_iter()).is_err());
+        assert!(parse_args_from(["weblogin".into(), "--client-id".into(), "cid".into()].into_iter()).is_err());
+        assert!(parse_args_from(["weblogin".into(), "--token".into(), "tok".into()].into_iter()).is_err());
+        let (web_mode, web_opts) = parse_args_from([
+            "weblogin".into(),
+            "--client-id".into(), "cid".into(),
+            "--token".into(), "tok".into(),
+        ].into_iter()).unwrap();
+        assert_eq!(web_mode, "weblogin");
+        assert_eq!(web_opts.client_id, "cid");
+        assert_eq!(web_opts.token, PathBuf::from("tok"));
+
+        // run without --cache is an error
+        assert!(parse_args_from(["run".into()].into_iter()).is_err());
+    }
 }
