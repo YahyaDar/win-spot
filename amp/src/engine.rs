@@ -11,6 +11,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use windows_sys::Win32::Foundation::HWND;
@@ -21,6 +22,7 @@ use crate::config::{config_dir, Settings};
 pub const WM_ENGINE: u32 = 0x8000 + 1; // WM_APP + 1: events are waiting
 pub const WM_TASK: u32 = 0x8000 + 2; // WM_APP + 2: a sign-in finished (wparam: task, lparam: ok)
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const STOP_WAIT: Duration = Duration::from_millis(1500);
 
 pub struct Engine {
     pub bin: PathBuf,
@@ -36,6 +38,7 @@ pub struct Engine {
     pub error: String,
     next_id: u64,
     login_pid: std::cell::Cell<u32>,
+    stopping: Option<std::thread::JoinHandle<()>>,
 }
 
 fn post(hwnd: isize, msg: u32, w: usize, l: isize) {
@@ -59,6 +62,7 @@ impl Engine {
             error: String::new(),
             next_id: 0,
             login_pid: Default::default(),
+            stopping: None,
         }
     }
 
@@ -100,6 +104,7 @@ impl Engine {
 
     pub fn start(&mut self, s: &Settings, hwnd: isize) -> Result<(), String> {
         self.stop();
+        self.join_stopping();
         let cache = Self::cache_dir();
         let _ = std::fs::create_dir_all(&cache);
         let log = open_log(&Self::log_path()).map_err(|e| format!("engine.log: {e}"))?;
@@ -247,6 +252,12 @@ impl Engine {
             .then_some(id)
     }
 
+    pub fn join_stopping(&mut self) {
+        if let Some(h) = self.stopping.take() {
+            let _ = h.join();
+        }
+    }
+
     pub fn stop(&mut self) {
         self.gen += 1; // whatever the old one still says is ignored
         self.ready = false;
@@ -255,14 +266,9 @@ impl Engine {
             let _ = stdin.write_all(b"{\"cmd\":\"quit\"}\n");
         }
         if let Some(mut child) = self.child.take() {
-            // It says goodbye to Spotify (~200 ms) and exits; don't hang on a stuck one.
-            for _ in 0..30 {
-                if matches!(child.try_wait(), Ok(Some(_))) {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            let _ = child.kill();
+            self.stopping = Some(std::thread::spawn(move || {
+                finish_child(&mut child, STOP_WAIT);
+            }));
         }
     }
 
@@ -352,10 +358,40 @@ pub fn open_log(path: &Path) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
+/// Wait up to `wait` for the child to exit (polling), then kill it. Returns true if it had to be killed.
+fn finish_child(child: &mut Child, wait: Duration) -> bool {
+    let t0 = Instant::now();
+    let poll = Duration::from_millis(50);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return false,
+            Ok(None) => {
+                if t0.elapsed() >= wait {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return true;
+                }
+                std::thread::sleep(poll.min(wait.saturating_sub(t0.elapsed())));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return true;
+            }
+        }
+    }
+}
+
 impl Drop for Engine {
     fn drop(&mut self) {
         self.cancel_sign_in();
-        self.stop();
+        if let Some(mut stdin) = self.stdin.take() {
+            let _ = stdin.write_all(b"{\"cmd\":\"quit\"}\n");
+        }
+        if let Some(mut child) = self.child.take() {
+            finish_child(&mut child, Duration::from_millis(300));
+        }
+        self.join_stopping();
     }
 }
 
@@ -476,5 +512,89 @@ mod tests {
         assert_eq!(parts[4], "---");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_finish_child_already_exited() {
+        let mut child = Command::new("cmd")
+            .args(["/c", "exit", "0"])
+            .spawn()
+            .unwrap();
+        assert!(child.wait().is_ok());
+        let t0 = Instant::now();
+        let killed = finish_child(&mut child, Duration::from_millis(500));
+        assert!(!killed);
+        assert!(t0.elapsed() < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_finish_child_long_running() {
+        let mut child = Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 > nul"])
+            .spawn()
+            .unwrap();
+        let t0 = Instant::now();
+        let killed = finish_child(&mut child, Duration::from_millis(200));
+        let el = t0.elapsed();
+        assert!(killed);
+        assert!(
+            el >= Duration::from_millis(200) && el < Duration::from_millis(1000),
+            "elapsed was {:?}",
+            el
+        );
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_engine_stop_non_blocking() {
+        let mut engine = Engine::new(PathBuf::from("fake"));
+        let child = Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 > nul"])
+            .spawn()
+            .unwrap();
+        engine.child = Some(child);
+        let t0 = Instant::now();
+        engine.stop();
+        let el_stop = t0.elapsed();
+        assert!(
+            el_stop < Duration::from_millis(100),
+            "stop took {:?}, expected < 100ms",
+            el_stop
+        );
+        let t1 = Instant::now();
+        engine.join_stopping();
+        let el_join = t1.elapsed();
+        assert!(
+            el_join <= STOP_WAIT + Duration::from_millis(500),
+            "join took {:?}",
+            el_join
+        );
+    }
+
+    #[test]
+    fn test_start_ordering_join_stopping() {
+        let mut engine = Engine::new(PathBuf::from("fake"));
+        let t0 = Instant::now();
+        engine.join_stopping();
+        engine.join_stopping();
+        assert!(t0.elapsed() < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_engine_drop_kills_child() {
+        let child = Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 > nul"])
+            .spawn()
+            .unwrap();
+        let mut engine = Engine::new(PathBuf::from("fake"));
+        engine.child = Some(child);
+        let t0 = Instant::now();
+        drop(engine);
+        let el = t0.elapsed();
+        assert!(
+            el < Duration::from_millis(1200),
+            "drop took {:?}, expected ~1s",
+            el
+        );
     }
 }
