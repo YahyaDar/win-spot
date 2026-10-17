@@ -686,11 +686,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deliberate_ci_fail_engine() {
-        assert!(false, "deliberate engine failure for CI verification");
-    }
-
-    #[test]
     fn cmd_play_context_minimal() {
         let json = r#"{"cmd":"play_context","uri":"spotify:album:test"}"#;
         let cmd: Cmd = serde_json::from_str(json).unwrap();
