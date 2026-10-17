@@ -1210,25 +1210,28 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
     let Some(a) = app() else { return false };
     let ctrl = down(VK_CONTROL);
     if a.typing {
-        match vk {
-            VK_RETURN => {
+        match input::typing_key_action(vk, ctrl) {
+            input::TypingKeyAction::Submit => {
                 reset_input_decoder();
                 a.submit_search();
             }
-            VK_ESCAPE => {
+            input::TypingKeyAction::Cancel => {
                 reset_input_decoder();
                 a.typing = false;
                 a.inv_pl();
             }
-            VK_BACK => {
+            input::TypingKeyAction::Backspace => {
+                reset_input_decoder();
                 a.query.pop();
                 a.inv_pl();
             }
-            _ if ctrl && vk == b'U' as u16 => {
+            input::TypingKeyAction::Clear => {
+                reset_input_decoder();
                 a.query.clear();
                 a.inv_pl();
             }
-            _ if ctrl && vk == b'V' as u16 => {
+            input::TypingKeyAction::Paste => {
+                reset_input_decoder();
                 if let Some(t) = clipboard_text() {
                     spotify::append_capped(
                         &mut a.query,
@@ -1238,7 +1241,7 @@ fn key(vk: u16, in_pl: bool, alt: bool) -> bool {
                     a.inv_pl();
                 }
             }
-            _ => return false, // letters arrive as WM_CHAR
+            input::TypingKeyAction::Char => return false,
         }
         a.reschedule();
         return true;
@@ -1547,6 +1550,9 @@ fn devices_menu() {
 
 fn run_command(cmd: usize) {
     let Some(a) = app() else { return };
+    if a.typing {
+        reset_input_decoder();
+    }
     match cmd {
         0 => {}
         M_LIKED => a.open_list("liked"),

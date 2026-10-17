@@ -35,6 +35,35 @@ impl Utf16Decoder {
     }
 }
 
+/// Action to take on a key event while typing in search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypingKeyAction {
+    /// Submit query (Enter)
+    Submit,
+    /// Cancel typing (Esc)
+    Cancel,
+    /// Backspace
+    Backspace,
+    /// Clear query (Ctrl+U)
+    Clear,
+    /// Paste clipboard (Ctrl+V)
+    Paste,
+    /// Character to be processed via WM_CHAR
+    Char,
+}
+
+/// Determines the action for a virtual key while typing in search.
+pub fn typing_key_action(vk: u16, ctrl: bool) -> TypingKeyAction {
+    match vk {
+        0x0D => TypingKeyAction::Submit,    // VK_RETURN
+        0x1B => TypingKeyAction::Cancel,    // VK_ESCAPE
+        0x08 => TypingKeyAction::Backspace, // VK_BACK
+        vk if ctrl && vk == b'U' as u16 => TypingKeyAction::Clear,
+        vk if ctrl && vk == b'V' as u16 => TypingKeyAction::Paste,
+        _ => TypingKeyAction::Char,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +164,17 @@ mod tests {
         for unit in 0..=0xFFFF {
             let _ = d.push(unit);
         }
+    }
+
+    #[test]
+    fn test_typing_key_action() {
+        assert_eq!(typing_key_action(0x0D, false), TypingKeyAction::Submit);
+        assert_eq!(typing_key_action(0x1B, false), TypingKeyAction::Cancel);
+        assert_eq!(typing_key_action(0x08, false), TypingKeyAction::Backspace);
+        assert_eq!(typing_key_action(b'U' as u16, true), TypingKeyAction::Clear);
+        assert_eq!(typing_key_action(b'U' as u16, false), TypingKeyAction::Char);
+        assert_eq!(typing_key_action(b'V' as u16, true), TypingKeyAction::Paste);
+        assert_eq!(typing_key_action(b'V' as u16, false), TypingKeyAction::Char);
+        assert_eq!(typing_key_action(b'A' as u16, false), TypingKeyAction::Char);
     }
 }
