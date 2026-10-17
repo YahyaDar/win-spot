@@ -362,4 +362,294 @@ mod tests {
         assert_eq!(s.pl.normal_bg, 0x1C3D7D);
         assert!(s.nums_ex);
     }
+
+    #[test]
+    fn test_parse_pledit() {
+        // valid colors
+        let text = "Normal=00FF00\nCurrent=FFFFFF\nNormalBG=000000\nSelectedBG=0000C6\nFont=Tahoma\n";
+        let pl = parse_pledit(text);
+        assert_eq!(pl.normal, 0x00FF00);
+        assert_eq!(pl.current, 0xFFFFFF);
+        assert_eq!(pl.normal_bg, 0x000000);
+        assert_eq!(pl.selected_bg, 0x0000C6);
+        assert_eq!(pl.font, "Tahoma");
+
+        // # prefix
+        let with_hash = parse_pledit("Normal=#112233\n");
+        assert_eq!(with_hash.normal, 0x112233);
+
+        // short value ignored (falls back to default 0x00FF00)
+        let short = parse_pledit("Normal=123\n");
+        assert_eq!(short.normal, 0x00FF00);
+
+        // font name over 31 characters ignored
+        let long_font = parse_pledit("Font=12345678901234567890123456789012\n");
+        assert_eq!(long_font.font, "Arial");
+
+        // mixed case keys
+        let mixed = parse_pledit("nOrMaL=123456\nFoNt=Courier\n");
+        assert_eq!(mixed.normal, 0x123456);
+        assert_eq!(mixed.font, "Courier");
+    }
+
+    #[test]
+    #[ignore = "BUG: parse_pledit byte slicing panics on multibyte character at boundary"]
+    fn test_parse_pledit_multibyte_slice() {
+        // 5 ASCII bytes + 4-byte emoji: byte 6 is inside the emoji char boundary
+        let _ = parse_pledit("Normal=12345😀\n");
+    }
+
+    #[test]
+    fn test_parse_region() {
+        // valid
+        let text = "[Normal]\nNumPoints=4\nPointList=0,0 10,0 10,10 0,10\n";
+        let r = parse_region(text);
+        assert_eq!(r, vec![vec![(0, 0), (10, 0), (10, 10), (0, 10)]]);
+
+        // NumPoints smaller than 3 stops parsing
+        let small_n = parse_region("[Normal]\nNumPoints=2\nPointList=0,0 10,0\n");
+        assert!(small_n.is_empty());
+
+        // point list shorter than declared stops parsing
+        let short_pts = parse_region("[Normal]\nNumPoints=4\nPointList=0,0 10,0\n");
+        assert!(short_pts.is_empty());
+
+        // huge numbers clamped to 2000
+        let huge = parse_region("[Normal]\nNumPoints=3\nPointList=9999,9999 0,0 10,10\n");
+        assert_eq!(huge, vec![vec![(2000, 2000), (0, 0), (10, 10)]]);
+
+        // section other than [Normal] ignored
+        let other = parse_region("[Other]\nNumPoints=4\nPointList=0,0 10,0 10,10 0,10\n");
+        assert!(other.is_empty());
+    }
+
+    fn make_bmp(w: i32, h: i32, bpp: u16, palette: &[u32], pixels: &[u8]) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(b"BM");
+        let pal_len = palette.len() * 4;
+        let off = 14 + 40 + pal_len;
+        let file_size = off + pixels.len();
+        d.extend_from_slice(&(file_size as u32).to_le_bytes());
+        d.extend_from_slice(&[0u8; 4]);
+        d.extend_from_slice(&(off as u32).to_le_bytes());
+        d.extend_from_slice(&40u32.to_le_bytes()); // hs = 40
+        d.extend_from_slice(&w.to_le_bytes());
+        d.extend_from_slice(&h.to_le_bytes());
+        d.extend_from_slice(&1u16.to_le_bytes()); // planes
+        d.extend_from_slice(&bpp.to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes()); // comp = BI_RGB
+        d.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes()); // x ppm
+        d.extend_from_slice(&0u32.to_le_bytes()); // y ppm
+        d.extend_from_slice(&(palette.len() as u32).to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes()); // important colors
+        for &color in palette {
+            d.push((color & 0xFF) as u8);
+            d.push(((color >> 8) & 0xFF) as u8);
+            d.push(((color >> 16) & 0xFF) as u8);
+            d.push(0);
+        }
+        d.extend_from_slice(pixels);
+        d
+    }
+
+    #[test]
+    fn test_decode_bmp_shapes() {
+        // 24-bit bottom-up (w=2, h=2, stride=8)
+        // Row 0 (bottom, y=1): Red (0xFF0000 -> B=0,G=0,R=FF), Green (0x00FF00 -> B=0,G=FF,R=0), 2 pad bytes
+        // Row 1 (top, y=0): Blue (0x0000FF -> B=FF,G=0,R=0), White (0xFFFFFF -> B=FF,G=FF,R=FF), 2 pad bytes
+        let row_bottom = [0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0x00];
+        let row_top = [0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00];
+        let mut px_24_bu = Vec::new();
+        px_24_bu.extend_from_slice(&row_bottom);
+        px_24_bu.extend_from_slice(&row_top);
+        let bmp24_bu = make_bmp(2, 2, 24, &[], &px_24_bu);
+        let dec24_bu = decode_bmp(&bmp24_bu).unwrap();
+        assert_eq!(dec24_bu.w, 2);
+        assert_eq!(dec24_bu.h, 2);
+        assert_eq!(dec24_bu.at(0, 0), Some(0x0000FF)); // Blue
+        assert_eq!(dec24_bu.at(1, 0), Some(0xFFFFFF)); // White
+        assert_eq!(dec24_bu.at(0, 1), Some(0xFF0000)); // Red
+        assert_eq!(dec24_bu.at(1, 1), Some(0x00FF00)); // Green
+
+        // 24-bit top-down (w=2, h=-2)
+        let mut px_24_td = Vec::new();
+        px_24_td.extend_from_slice(&row_top);
+        px_24_td.extend_from_slice(&row_bottom);
+        let bmp24_td = make_bmp(2, -2, 24, &[], &px_24_td);
+        let dec24_td = decode_bmp(&bmp24_td).unwrap();
+        assert_eq!(dec24_td.at(0, 0), Some(0x0000FF));
+        assert_eq!(dec24_td.at(1, 0), Some(0xFFFFFF));
+        assert_eq!(dec24_td.at(0, 1), Some(0xFF0000));
+        assert_eq!(dec24_td.at(1, 1), Some(0x00FF00));
+
+        // 8-bit paletted bottom-up (w=2, h=2, stride=4)
+        let palette_8 = [0x112233, 0x445566];
+        // bottom row: idx 0, idx 1, 2 pad bytes
+        // top row: idx 1, idx 0, 2 pad bytes
+        let mut px_8_bu = Vec::new();
+        px_8_bu.extend_from_slice(&[0, 1, 0, 0]);
+        px_8_bu.extend_from_slice(&[1, 0, 0, 0]);
+        let bmp8_bu = make_bmp(2, 2, 8, &palette_8, &px_8_bu);
+        let dec8_bu = decode_bmp(&bmp8_bu).unwrap();
+        assert_eq!(dec8_bu.at(0, 0), Some(0x445566));
+        assert_eq!(dec8_bu.at(1, 0), Some(0x112233));
+        assert_eq!(dec8_bu.at(0, 1), Some(0x112233));
+        assert_eq!(dec8_bu.at(1, 1), Some(0x445566));
+
+        // 8-bit paletted top-down (w=2, h=-2)
+        let mut px_8_td = Vec::new();
+        px_8_td.extend_from_slice(&[1, 0, 0, 0]);
+        px_8_td.extend_from_slice(&[0, 1, 0, 0]);
+        let bmp8_td = make_bmp(2, -2, 8, &palette_8, &px_8_td);
+        let dec8_td = decode_bmp(&bmp8_td).unwrap();
+        assert_eq!(dec8_td.at(0, 0), Some(0x445566));
+        assert_eq!(dec8_td.at(1, 0), Some(0x112233));
+        assert_eq!(dec8_td.at(0, 1), Some(0x112233));
+        assert_eq!(dec8_td.at(1, 1), Some(0x445566));
+
+        // 1-bit bottom-up (w=2, h=2, stride=4)
+        let palette_1 = [0x000000, 0xFFFFFF];
+        // In 1-bit, pixel 0 is bit 7, pixel 1 is bit 6
+        // bottom row: 0b10000000 (idx 1, idx 0)
+        // top row: 0b01000000 (idx 0, idx 1)
+        let mut px_1_bu = Vec::new();
+        px_1_bu.extend_from_slice(&[0b10000000, 0, 0, 0]);
+        px_1_bu.extend_from_slice(&[0b01000000, 0, 0, 0]);
+        let bmp1_bu = make_bmp(2, 2, 1, &palette_1, &px_1_bu);
+        let dec1_bu = decode_bmp(&bmp1_bu).unwrap();
+        assert_eq!(dec1_bu.at(0, 0), Some(0x000000));
+        assert_eq!(dec1_bu.at(1, 0), Some(0xFFFFFF));
+        assert_eq!(dec1_bu.at(0, 1), Some(0xFFFFFF));
+        assert_eq!(dec1_bu.at(1, 1), Some(0x000000));
+
+        // 1-bit top-down (w=2, h=-2)
+        let mut px_1_td = Vec::new();
+        px_1_td.extend_from_slice(&[0b01000000, 0, 0, 0]);
+        px_1_td.extend_from_slice(&[0b10000000, 0, 0, 0]);
+        let bmp1_td = make_bmp(2, -2, 1, &palette_1, &px_1_td);
+        let dec1_td = decode_bmp(&bmp1_td).unwrap();
+        assert_eq!(dec1_td.at(0, 0), Some(0x000000));
+        assert_eq!(dec1_td.at(1, 0), Some(0xFFFFFF));
+        assert_eq!(dec1_td.at(0, 1), Some(0xFFFFFF));
+        assert_eq!(dec1_td.at(1, 1), Some(0x000000));
+
+        // Rejections:
+        // empty input
+        assert!(decode_bmp(b"").is_none());
+        // BM only
+        assert!(decode_bmp(b"BM").is_none());
+        // header size under 40
+        let mut bad_hs = bmp24_bu.clone();
+        bad_hs[14] = 39;
+        assert!(decode_bmp(&bad_hs).is_none());
+        // zero or negative width
+        let bmp_w0 = make_bmp(0, 2, 24, &[], &px_24_bu);
+        assert!(decode_bmp(&bmp_w0).is_none());
+        let bmp_w_neg = make_bmp(-2, 2, 24, &[], &px_24_bu);
+        assert!(decode_bmp(&bmp_w_neg).is_none());
+        // width over 4096
+        let bmp_huge_w = make_bmp(4097, 2, 24, &[], &px_24_bu);
+        assert!(decode_bmp(&bmp_huge_w).is_none());
+        // truncated pixel data
+        let truncated = &bmp24_bu[..bmp24_bu.len() - 4];
+        assert!(decode_bmp(truncated).is_none());
+    }
+
+    fn make_test_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zip = Vec::new();
+        let mut central_dir = Vec::new();
+
+        for &(name, data) in entries {
+            let local_header_offset = zip.len() as u32;
+            let name_bytes = name.as_bytes();
+
+            // Local file header: PK\x03\x04
+            zip.extend_from_slice(b"PK\x03\x04");
+            zip.extend_from_slice(&10u16.to_le_bytes()); // version needed
+            zip.extend_from_slice(&0u16.to_le_bytes());  // flags
+            zip.extend_from_slice(&0u16.to_le_bytes());  // method = 0 (stored)
+            zip.extend_from_slice(&0u32.to_le_bytes());  // mod time/date
+            zip.extend_from_slice(&0u32.to_le_bytes());  // crc32
+            zip.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed size
+            zip.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncompressed size
+            zip.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            zip.extend_from_slice(&0u16.to_le_bytes());  // extra len
+            zip.extend_from_slice(name_bytes);
+            zip.extend_from_slice(data);
+
+            // Central directory entry: PK\x01\x02
+            central_dir.extend_from_slice(b"PK\x01\x02");
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // version made by
+            central_dir.extend_from_slice(&10u16.to_le_bytes()); // version needed
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // flags
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // method = 0
+            central_dir.extend_from_slice(&0u32.to_le_bytes()); // time/date
+            central_dir.extend_from_slice(&0u32.to_le_bytes()); // crc32
+            central_dir.extend_from_slice(&(data.len() as u32).to_le_bytes()); // csize
+            central_dir.extend_from_slice(&(data.len() as u32).to_le_bytes()); // usize
+            central_dir.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // comment len
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // disk num
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+            central_dir.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            central_dir.extend_from_slice(&local_header_offset.to_le_bytes());
+            central_dir.extend_from_slice(name_bytes);
+        }
+
+        let cd_offset = zip.len() as u32;
+        let cd_size = central_dir.len() as u32;
+        zip.extend_from_slice(&central_dir);
+
+        // End of central directory record: PK\x05\x06
+        zip.extend_from_slice(b"PK\x05\x06");
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk num
+        zip.extend_from_slice(&0u16.to_le_bytes()); // cd disk
+        zip.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // disk entries
+        zip.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // total entries
+        zip.extend_from_slice(&cd_size.to_le_bytes());
+        zip.extend_from_slice(&cd_offset.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes()); // comment len
+
+        zip
+    }
+
+    #[test]
+    fn test_unzip_shapes() {
+        // Stored (method 0) zip with two entries: one normal, one in a subfolder with backslashes
+        let zip_bytes = make_test_zip(&[
+            ("main.txt", b"main content"),
+            ("subfolder\\nested.txt", b"nested content"),
+        ]);
+        let files = unzip(&zip_bytes).unwrap();
+        assert_eq!(files.get("main.txt").map(|v| v.as_slice()), Some(b"main content".as_slice()));
+        // Entry in subfolder with backslashes uses lowercase base name
+        assert_eq!(files.get("nested.txt").map(|v| v.as_slice()), Some(b"nested content".as_slice()));
+
+        // Corrupt EOCD (missing signature)
+        assert!(unzip(b"not a valid zip file").is_err());
+
+        // Truncated central directory
+        let truncated_zip = &zip_bytes[..zip_bytes.len() - 15];
+        assert!(unzip(truncated_zip).is_err());
+    }
+
+    #[test]
+    fn test_skin_load_robustness() {
+        // Robustness loop: Skin::load(&DEFAULT[..n]) for roughly 200 evenly spaced n values
+        let len = DEFAULT.len();
+        for i in 0..=200 {
+            let n = i * len / 200;
+            let _ = Skin::load(&DEFAULT[..n]); // Must not panic
+        }
+
+        // Robustness loop: 1 flipped byte at 200 spaced positions
+        for i in 0..200 {
+            let pos = i * len / 200;
+            let mut mutated = DEFAULT.to_vec();
+            mutated[pos] ^= 0xFF;
+            let _ = Skin::load(&mutated); // Must not panic
+        }
+    }
 }

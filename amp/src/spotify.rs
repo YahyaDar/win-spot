@@ -42,7 +42,7 @@ impl Track {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Repeat {
     Off,
     Context,
@@ -535,5 +535,298 @@ mod tests {
                 assert!(s.is_char_boundary(s.len()));
             }
         }
+    }
+
+    #[test]
+    fn test_repeat_cycle() {
+        assert_eq!(Repeat::parse("off"), Repeat::Off);
+        assert_eq!(Repeat::parse("context"), Repeat::Context);
+        assert_eq!(Repeat::parse("track"), Repeat::Track);
+        assert_eq!(Repeat::parse("unknown"), Repeat::Off);
+
+        assert_eq!(Repeat::Off.as_str(), "off");
+        assert_eq!(Repeat::Context.as_str(), "context");
+        assert_eq!(Repeat::Track.as_str(), "track");
+
+        assert_eq!(Repeat::Off.next(), Repeat::Context);
+        assert_eq!(Repeat::Context.next(), Repeat::Track);
+        assert_eq!(Repeat::Track.next(), Repeat::Off);
+    }
+
+    #[test]
+    fn test_fmt_time() {
+        assert_eq!(fmt_time(0), "0:00");
+        assert_eq!(fmt_time(59_000), "0:59");
+        assert_eq!(fmt_time(61_000), "1:01");
+        assert_eq!(fmt_time(3_661_000), "1:01:01");
+    }
+
+    #[test]
+    fn test_num() {
+        assert_eq!(num(&Value::Null), 0);
+        assert_eq!(num(&json!(42)), 42);
+        assert_eq!(num(&json!(42.9)), 42);
+        assert_eq!(num(&json!(-10.5)), 0);
+        assert_eq!(num(&json!("123")), 123);
+        assert_eq!(num(&json!("  456  ")), 456);
+        assert_eq!(num(&json!("not_a_number")), 0);
+        assert_eq!(num(&json!([1, 2])), 0);
+        assert_eq!(num(&json!({"x": 1})), 0);
+    }
+
+    #[test]
+    fn test_clean_strips_all_control() {
+        // Rust's char::is_control strips all control characters including \t, \r, \n, \x00, and \x1b
+        assert_eq!(clean("hello\tworld\r\n\x00\x1b!"), "helloworld!");
+        assert_eq!(clean("plain ASCII 123"), "plain ASCII 123");
+    }
+
+    #[test]
+    fn test_track_shapes() {
+        // Episode path
+        let ep = json!({
+            "uri": "spotify:episode:ep123",
+            "type": "episode",
+            "name": "Episode One",
+            "show": {"name": "Tech Talk"},
+            "duration_ms": 1800000
+        });
+        let ep_track = track(&ep, 0, false).unwrap();
+        assert_eq!(ep_track.artists, "Tech Talk");
+        assert_eq!(ep_track.album, "");
+
+        // is_local: true in item
+        let local1 = json!({
+            "uri": "spotify:track:local1",
+            "name": "Local Track",
+            "is_local": true
+        });
+        assert!(!track(&local1, 0, false).unwrap().playable);
+
+        // is_local: true as argument
+        let normal = json!({
+            "uri": "spotify:track:normal1",
+            "name": "Normal Track"
+        });
+        assert!(!track(&normal, 0, true).unwrap().playable);
+
+        // is_playable: false
+        let unplayable = json!({
+            "uri": "spotify:track:unplayable",
+            "name": "Blocked",
+            "is_playable": false
+        });
+        assert!(!track(&unplayable, 0, false).unwrap().playable);
+
+        // missing name becomes Unknown
+        let noname = json!({
+            "uri": "spotify:track:noname"
+        });
+        assert_eq!(track(&noname, 0, false).unwrap().name, "Unknown");
+    }
+
+    #[test]
+    fn test_page_next_offset() {
+        // next_offset is None when next is a string but items are empty
+        let empty_page = json!({
+            "items": [],
+            "total": 0,
+            "next": "https://api.spotify.com/v1/me/tracks?offset=50"
+        });
+        let p = page(&empty_page, 0, |x| x);
+        assert_eq!(p.next_offset, None);
+    }
+
+    #[test]
+    fn test_playlists() {
+        let mut list = Vec::new();
+        let data = json!({
+            "items": [
+                {"id": "valid123", "uri": "spotify:playlist:valid123", "name": "Favorites", "tracks": {"total": 10}},
+                {"id": "bad-id!", "uri": "spotify:playlist:bad", "name": "Bad ID", "tracks": {"total": 5}},
+                {"id": "no_uri_list", "name": "No URI", "tracks": {"total": 2}},
+                {"id": "", "uri": "spotify:playlist:empty_id", "name": "Empty ID"}
+            ]
+        });
+        playlists(&data, &mut list);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "valid123");
+        assert_eq!(list[0].name, "Favorites");
+        assert_eq!(list[0].total, 10);
+    }
+
+    #[test]
+    fn test_devices() {
+        let data = json!({
+            "devices": [
+                {"id": "dev1", "name": "Living Room", "type": "Speaker", "is_active": true},
+                {"name": "No ID Device", "type": "Computer", "is_active": false},
+                {"id": "", "name": "Empty ID Device", "type": "Smartphone", "is_active": false}
+            ]
+        });
+        let devs = devices(&data);
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].id, "dev1");
+        assert_eq!(devs[0].name, "Living Room");
+        assert!(devs[0].active);
+    }
+
+    #[test]
+    fn test_playback() {
+        let now = Instant::now();
+        // volume is None when volume_percent is null
+        let null_vol = json!({
+            "device": {"id": "d1", "volume_percent": null, "supports_volume": true}
+        });
+        let pb_null = playback(&null_vol, now).unwrap();
+        assert_eq!(pb_null.volume, None);
+
+        // volume is None when supports_volume is false
+        let unsupp_vol = json!({
+            "device": {"id": "d1", "volume_percent": 80, "supports_volume": false}
+        });
+        let pb_unsupp = playback(&unsupp_vol, now).unwrap();
+        assert_eq!(pb_unsupp.volume, None);
+
+        // volume is Some when valid and supported
+        let ok_vol = json!({
+            "device": {"id": "d1", "volume_percent": 75, "supports_volume": true}
+        });
+        let pb_ok = playback(&ok_vol, now).unwrap();
+        assert_eq!(pb_ok.volume, Some(75));
+    }
+
+    #[test]
+    fn test_playback_progress_and_rebase() {
+        use std::time::Duration;
+        let start = Instant::now();
+        let track_item = Rc::new(Track {
+            uri: "spotify:track:t1".into(),
+            name: "Song".into(),
+            artists: "Artist".into(),
+            album: "Album".into(),
+            duration_ms: 10_000,
+            pos: 0,
+            playable: true,
+        });
+
+        // Playing: progress increases with elapsed time
+        let mut pb = Playback {
+            track: Some(track_item.clone()),
+            playing: true,
+            progress_ms: 1_000,
+            at: start,
+            device_id: None,
+            device_name: String::new(),
+            volume: None,
+            shuffle: false,
+            repeat: Repeat::Off,
+            context_uri: None,
+        };
+        assert_eq!(pb.progress(start + Duration::from_millis(500)), 1_500);
+
+        // Clamps to duration when playing
+        assert_eq!(pb.progress(start + Duration::from_millis(20_000)), 10_000);
+
+        // Paused: progress remains constant
+        pb.playing = false;
+        assert_eq!(pb.progress(start + Duration::from_millis(500)), 1_000);
+
+        // Unknown duration (duration_ms == 0): does not clamp
+        let pb_unknown = Playback {
+            track: Some(Rc::new(Track {
+                uri: "spotify:track:t2".into(),
+                name: "Live".into(),
+                artists: "Artist".into(),
+                album: "Album".into(),
+                duration_ms: 0,
+                pos: 0,
+                playable: true,
+            })),
+            playing: true,
+            progress_ms: 50_000,
+            at: start,
+            device_id: None,
+            device_name: String::new(),
+            volume: None,
+            shuffle: false,
+            repeat: Repeat::Off,
+            context_uri: None,
+        };
+        assert_eq!(pb_unknown.progress(start + Duration::from_millis(10_000)), 60_000);
+
+        // rebase
+        pb.playing = true;
+        pb.rebase(start + Duration::from_millis(2_000));
+        assert_eq!(pb.progress_ms, 3_000);
+        assert_eq!(pb.at, start + Duration::from_millis(2_000));
+    }
+
+    #[test]
+    fn test_api_error_describe() {
+        // login
+        let e_login = ApiError { status: 401, msg: "Token expired".into(), login: true, retry_after: 0 };
+        assert_eq!(e_login.describe(), "Spotify sign-in expired: choose Sign in again from the menu");
+
+        // status 0 with message
+        let e_s0_msg = ApiError { status: 0, msg: "Connection refused".into(), login: false, retry_after: 0 };
+        assert_eq!(e_s0_msg.describe(), "Connection refused");
+
+        // status 0 without message
+        let e_s0_nomsg = ApiError { status: 0, msg: "".into(), login: false, retry_after: 0 };
+        assert_eq!(e_s0_nomsg.describe(), "Network error: can't reach Spotify");
+
+        // 404 device
+        let e_404_dev = ApiError { status: 404, msg: "No active device".into(), login: false, retry_after: 0 };
+        assert_eq!(e_404_dev.describe(), "No active device: pick one from the menu");
+
+        // 403 premium
+        let e_403_prem = ApiError { status: 403, msg: "Premium required".into(), login: false, retry_after: 0 };
+        assert_eq!(e_403_prem.describe(), "Spotify Premium is required for playback");
+
+        // other 403
+        let e_403_other = ApiError { status: 403, msg: "Forbidden: user not registered".into(), login: false, retry_after: 0 };
+        assert_eq!(e_403_other.describe(), "Not allowed: user not registered");
+
+        // 429
+        let e_429 = ApiError { status: 429, msg: "".into(), login: false, retry_after: 5 };
+        assert_eq!(e_429.describe(), "Rate limited by Spotify, slowing down");
+
+        // generic reason after last colon
+        let e_generic = ApiError { status: 500, msg: "Server Error: Internal server error".into(), login: false, retry_after: 0 };
+        assert_eq!(e_generic.describe(), "Internal server error");
+
+        // generic reason without message
+        let e_no_reason = ApiError { status: 502, msg: "".into(), login: false, retry_after: 0 };
+        assert_eq!(e_no_reason.describe(), "HTTP 502");
+    }
+
+    #[test]
+    fn test_track_label_id_is_track() {
+        let t1 = Track {
+            uri: "spotify:track:6rqhFgbbKwnb9MLmUQDhG6".into(),
+            name: "Song".into(),
+            artists: "Band".into(),
+            album: "Album".into(),
+            duration_ms: 200_000,
+            pos: 1,
+            playable: true,
+        };
+        assert_eq!(t1.label(), "Band - Song");
+        assert_eq!(t1.id(), "6rqhFgbbKwnb9MLmUQDhG6");
+        assert!(t1.is_track());
+
+        let t2 = Track {
+            uri: "spotify:episode:ep999".into(),
+            name: "Episode Only".into(),
+            artists: "".into(),
+            album: "".into(),
+            duration_ms: 100_000,
+            pos: 2,
+            playable: true,
+        };
+        assert_eq!(t2.label(), "Episode Only");
+        assert_eq!(t2.id(), "ep999");
+        assert!(!t2.is_track());
     }
 }
