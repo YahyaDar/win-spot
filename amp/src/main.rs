@@ -1859,6 +1859,10 @@ fn ask_client_id() -> Option<String> {
 /// `--snapshot DIR`: draw both windows with sample data into DIR/main.bmp and DIR/pl.bmp,
 /// without opening any window. Used to check the drawing against the skin.
 fn snapshot(dir: &str) -> i32 {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("snapshot dir: {e}");
+        return 1;
+    }
     use std::rc::Rc;
     let sk = match skin::Skin::load(skin::DEFAULT) {
         Ok(s) => s,
@@ -1963,4 +1967,26 @@ fn write_bmp(path: &str, w: i32, h: i32, px: &[u32]) -> bool {
         d.extend_from_slice(&p.to_le_bytes());
     }
     std::fs::write(path, d).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_snapshot_creates_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "amp_snap_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!dir.exists());
+        let rc = snapshot(dir.to_str().unwrap());
+        assert_eq!(rc, 0);
+        assert!(dir.join("main.bmp").exists());
+        assert!(dir.join("pl.bmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
