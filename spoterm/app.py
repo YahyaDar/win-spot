@@ -44,6 +44,7 @@ ENTER = "ENTER"
 ESC = "\x1b"
 PADENTER = getattr(curses, "PADENTER", -999)
 BACKSPACE = (curses.KEY_BACKSPACE, "\b", "\x7f", "\x08")
+KEY_RELOAD = "r"
 
 
 class Echo:
@@ -172,6 +173,21 @@ def _scroll(sel: int, top: int, h: int, n: int) -> int:
     elif sel >= top + h:
         top = sel - h + 1
     return max(0, min(top, max(0, n - h)))
+
+
+def empty_state(tl, typing, ell):
+    """(message, hint, colour role) for a list that has no rows."""
+    if tl.locked:
+        return "Spotify doesn't let apps list this playlist", "press enter to play it", DIM
+    if tl.error:
+        return tl.error, f"press {KEY_RELOAD} to retry", WARN
+    if tl.loading:
+        return "Loading" + ell, "", DIM
+    if tl.kind == "search" and not tl.query:
+        return "Search Spotify", "type, then press enter" if typing else "press / to start", DIM
+    if tl.kind == "search":
+        return f'No results for "{tl.query}"', "try different words", DIM
+    return "Nothing here", "", DIM
 
 
 class App:
@@ -1293,7 +1309,7 @@ class App:
             "R": self.cycle_repeat,
             "f": self.toggle_like,
             "d": self.open_devices,
-            "r": self.refresh,
+            KEY_RELOAD: self.refresh,
             "[": lambda: self.cycle_list(-1), "]": lambda: self.cycle_list(1),
             "\t": self.toggle_focus, curses.KEY_BTAB: self.toggle_focus,
             "h": self.focus_side, curses.KEY_LEFT: self.focus_side,
@@ -1734,18 +1750,7 @@ class App:
 
     def draw_empty(self, lay: Layout, tl: TrackList) -> bool:
         ell = self.g["ell"]
-        if tl.locked:
-            msg, hint, role = "Spotify doesn't let apps list this playlist", "press enter to play it", DIM
-        elif tl.error:
-            msg, hint, role = tl.error, "press R to retry", WARN
-        elif tl.loading:
-            msg, hint, role = "Loading" + ell, "", DIM
-        elif tl.kind == "search" and not tl.query:
-            msg, hint, role = "Search Spotify", "type, then press enter" if self.typing else "press / to start", DIM
-        elif tl.kind == "search":
-            msg, hint, role = f'No results for "{tl.query}"', "try different words", DIM
-        else:
-            msg, hint, role = "Nothing here", "", DIM
+        msg, hint, role = empty_state(tl, self.typing, ell)
         s, T, x0, w = self.scr, self.theme, lay.x0, lay.w
         my, drew = lay.top + 1 + (lay.h - 1) // 3, False
         for y in range(lay.top + 1, lay.top + lay.h):
