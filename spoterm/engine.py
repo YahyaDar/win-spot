@@ -41,7 +41,24 @@ def find_binary(explicit: str = "") -> str | None:
         path = os.path.join(folder, EXE)
         if folder and os.path.isfile(path):
             return path
-    return None
+def _open_log(path: str):
+    """Rotates path to path.1 if it exists, and opens path for appending with a run marker."""
+    try:
+        if os.path.exists(path):
+            os.replace(path, path + ".1")
+    except OSError:
+        pass
+    try:
+        f = open(path, "a+b")
+    except OSError:
+        f = open(path, "wb")
+    marker = f"--- engine start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode("utf-8")
+    try:
+        f.write(marker)
+        f.flush()
+    except OSError:
+        pass
+    return f
 
 
 class Engine:
@@ -130,7 +147,7 @@ class Engine:
         kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if _WIN else {"start_new_session": True}
         # Buffered pipes: unbuffered, every line read would cost one system call per byte
         # (tens of thousands for a page of tracks). Writes are flushed line by line anyway.
-        with open(self.log_path, "wb") as log:     # the child keeps its own handle
+        with _open_log(self.log_path) as log:     # the child keeps its own handle
             self._proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                           stderr=log, env=self._env(), **kwargs)
         self.ready, self.device_id, self._exit_code = False, None, None

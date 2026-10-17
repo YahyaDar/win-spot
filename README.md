@@ -303,7 +303,7 @@ hidden per-app folder.
 | `.env` | Your settings, e.g. the Client ID `SpoTerm.exe` asks for on first run |
 | `token.json` | SpoTerm's login (the engine refreshes it in place) |
 | `engine/` | The player's saved login, device id and volume |
-| `engine.log` | The engine's log (overwritten each start) |
+| `engine.log` | The engine's log (previous run is kept as `engine.log.1`) |
 | `amp.cfg` | SpoTermAmp's window positions and options |
 | `crash.log` | Only if SpoTerm ever hits a bug: the details, for a bug report |
 

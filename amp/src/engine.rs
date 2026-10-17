@@ -8,7 +8,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -102,8 +102,7 @@ impl Engine {
         self.stop();
         let cache = Self::cache_dir();
         let _ = std::fs::create_dir_all(&cache);
-        let log =
-            std::fs::File::create(Self::log_path()).map_err(|e| format!("engine.log: {e}"))?;
+        let log = open_log(&Self::log_path()).map_err(|e| format!("engine.log: {e}"))?;
         let mut cmd = self.command(s);
         cmd.arg("run")
             .arg("--cache")
@@ -326,9 +325,156 @@ impl Engine {
     }
 }
 
+pub fn rotate_log(path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        let dot_one = PathBuf::from(format!("{}.1", path.display()));
+        std::fs::rename(path, dot_one)?;
+    }
+    Ok(())
+}
+
+pub fn open_log(path: &Path) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = rotate_log(path);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let marker = format!("--- engine start {secs} ---\n");
+    let _ = file.write_all(marker.as_bytes());
+    let _ = file.flush();
+    Ok(file)
+}
+
 impl Drop for Engine {
     fn drop(&mut self) {
         self.cancel_sign_in();
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let p =
+            std::env::temp_dir().join(format!("spoterm_test_log_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::create_dir_all(&p);
+        p
+    }
+
+    #[test]
+    fn test_rotate_and_open_log_fresh() {
+        let dir = temp_test_dir("fresh");
+        let log = dir.join("engine.log");
+        let log_1 = dir.join("engine.log.1");
+
+        let f = open_log(&log).unwrap();
+        drop(f);
+
+        assert!(log.exists(), "engine.log must be created");
+        assert!(
+            !log_1.exists(),
+            "engine.log.1 must not exist on fresh start"
+        );
+        let content = std::fs::read_to_string(&log).unwrap();
+        assert!(content.starts_with("--- engine start "));
+        assert!(content.ends_with(" ---\n"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rotate_and_open_log_existing() {
+        let dir = temp_test_dir("existing");
+        let log = dir.join("engine.log");
+        let log_1 = dir.join("engine.log.1");
+        std::fs::write(&log, "OLD").unwrap();
+
+        let f = open_log(&log).unwrap();
+        drop(f);
+
+        assert!(log_1.exists(), "engine.log.1 must exist after rotation");
+        let old_content = std::fs::read_to_string(&log_1).unwrap();
+        assert_eq!(old_content, "OLD");
+
+        let new_content = std::fs::read_to_string(&log).unwrap();
+        assert!(new_content.starts_with("--- engine start "));
+        assert!(!new_content.contains("OLD"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rotate_and_open_log_existing_both() {
+        let dir = temp_test_dir("both");
+        let log = dir.join("engine.log");
+        let log_1 = dir.join("engine.log.1");
+        std::fs::write(&log_1, "ANCIENT").unwrap();
+        std::fs::write(&log, "NEWEST_OLD").unwrap();
+
+        let f = open_log(&log).unwrap();
+        drop(f);
+
+        let dot_one_content = std::fs::read_to_string(&log_1).unwrap();
+        assert_eq!(dot_one_content, "NEWEST_OLD");
+
+        let new_content = std::fs::read_to_string(&log).unwrap();
+        assert!(new_content.starts_with("--- engine start "));
+        assert!(!new_content.contains("NEWEST_OLD"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rotate_open_while_handle_held() {
+        let dir = temp_test_dir("handle_held");
+        let log = dir.join("engine.log");
+        let log_1 = dir.join("engine.log.1");
+        std::fs::write(&log, "HELD_CONTENT").unwrap();
+
+        // On Windows, Rust opens std::fs::File with FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE.
+        // Therefore, rotate_log (std::fs::rename) succeeds even while an existing file handle is open.
+        let held_file = std::fs::OpenOptions::new().read(true).open(&log).unwrap();
+        rotate_log(&log).unwrap();
+        assert!(log_1.exists());
+        assert_eq!(std::fs::read_to_string(&log_1).unwrap(), "HELD_CONTENT");
+        drop(held_file);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_marker_line_format() {
+        let dir = temp_test_dir("marker");
+        let log = dir.join("engine.log");
+
+        let f = open_log(&log).unwrap();
+        drop(f);
+
+        let text = std::fs::read_to_string(&log).unwrap();
+        let trimmed = text.trim();
+        assert!(trimmed.starts_with("--- engine start "));
+        assert!(trimmed.ends_with(" ---"));
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0], "---");
+        assert_eq!(parts[1], "engine");
+        assert_eq!(parts[2], "start");
+        let secs = parts[3]
+            .parse::<u64>()
+            .expect("unix seconds must be numeric");
+        assert!(secs > 1_700_000_000);
+        assert_eq!(parts[4], "---");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
