@@ -1,6 +1,6 @@
 [package]
 name = "spoterm-amp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "SpoTermAmp: a classic Winamp-skinned window for SpoTerm's engine (Win32 + GDI, no framework)"
 license = "MIT"
