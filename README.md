@@ -166,6 +166,19 @@ C++ redistributable. `-SkipEngine` reuses existing engine and SpoTermAmp builds.
 It's a one-folder build rather than one self-extracting file on purpose: it starts
 instantly (nothing is unpacked to `%TEMP%` each launch) and antivirus flags it far less.
 
+## Running the tests
+
+```
+python -m pip install -r requirements.txt ruff
+python -m unittest discover -s tests -t . -v
+ruff check .
+
+cd engine && cargo test --locked
+cd ../amp && cargo test --locked      # Windows only
+```
+
+CI runs these same commands on every push and pull request. Note that `--crash-test` is an internal flag used to verify panic recording.
+
 ## First run
 
 Two one-time browser sign-ins happen before the UI opens:
