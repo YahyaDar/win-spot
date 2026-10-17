@@ -179,6 +179,11 @@ cd ../amp && cargo test --locked      # Windows only
 
 CI runs these same commands on every push and pull request. Note that `--crash-test` is an internal flag used to verify panic recording.
 
+To ignore formatting-only commits when running `git blame`:
+```
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
 ## First run
 
 Two one-time browser sign-ins happen before the UI opens:

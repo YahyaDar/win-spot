@@ -34,7 +34,6 @@ jobs:
           workspaces: ${{ matrix.crate }}
       - name: Format
         run: cargo fmt --check
-        continue-on-error: true   # TODO: make blocking after chore/rustfmt-baseline merges
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
