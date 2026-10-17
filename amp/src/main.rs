@@ -1588,7 +1588,6 @@ fn run_command(cmd: usize) {
         M_SIGNIN => a.sign_in_again(),
         M_SIGNIN_PLAYER => {
             a.engine.stop();
-            let _ = std::fs::remove_file(Engine::cache_dir().join("credentials.json"));
             a.phase = Phase::PlayerSignIn;
             a.flash("Sign in SpoTerm's player in your browser", false);
             a.engine.sign_in(&a.s, true, a.hmain as isize);

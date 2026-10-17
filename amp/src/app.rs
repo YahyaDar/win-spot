@@ -672,7 +672,7 @@ impl App {
         } else {
             if !ok {
                 self.flash(
-                    "Player sign-in skipped: SpoTermAmp will control other devices",
+                    player_signin_failed_message(crate::engine::Engine::player_signed_in()),
                     true,
                 );
             }
@@ -2412,4 +2412,29 @@ pub fn invalidate_rect(h: HWND, x: i32, y: i32, w: i32, hgt: i32, pct: i32) {
         pct,
     );
     unsafe { InvalidateRect(h, &r, 0) };
+}
+
+pub fn player_signin_failed_message(had_credentials: bool) -> &'static str {
+    if had_credentials {
+        "Player sign-in didn't finish: keeping your existing sign-in"
+    } else {
+        "Player sign-in skipped: SpoTermAmp will control other devices"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_player_signin_failed_message() {
+        assert_eq!(
+            player_signin_failed_message(true),
+            "Player sign-in didn't finish: keeping your existing sign-in"
+        );
+        assert_eq!(
+            player_signin_failed_message(false),
+            "Player sign-in skipped: SpoTermAmp will control other devices"
+        );
+    }
 }
