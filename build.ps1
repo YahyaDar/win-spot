@@ -90,6 +90,19 @@ New-Item -ItemType Directory -Force $snap | Out-Null
 $p = Start-Process -FilePath (Join-Path $app "SpoTermAmp.exe") -ArgumentList "--snapshot", "`"$snap`"" -Wait -PassThru
 if ($p.ExitCode -ne 0 -or -not (Test-Path (Join-Path $snap "main.bmp"))) { throw "SpoTermAmp.exe --snapshot failed (exit $($p.ExitCode))" }
 
+$tmpHome = Join-Path $work "crash-home"
+Remove-Item -Recurse -Force $tmpHome -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $tmpHome | Out-Null
+$oldProfile = $env:USERPROFILE
+try {
+    $env:USERPROFILE = $tmpHome
+    $p = Start-Process -FilePath (Join-Path $app "SpoTermAmp.exe") -ArgumentList "--crash-test" -Wait -PassThru
+} finally { $env:USERPROFILE = $oldProfile }
+$log = Join-Path $tmpHome ".config\spoterm\crash.log"
+if ($p.ExitCode -eq 0 -or -not (Test-Path $log) -or -not (Select-String -Path $log -Pattern "crash test" -Quiet)) {
+    throw "SpoTermAmp.exe --crash-test did not leave a crash.log (exit $($p.ExitCode))"
+}
+
 $zip = Join-Path $dist "SpoTerm-$version-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
 # Antivirus often still holds freshly written files for a moment, so retry briefly.
